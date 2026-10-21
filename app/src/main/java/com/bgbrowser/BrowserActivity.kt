@@ -1,0 +1,1081 @@
+package com.bgbrowser
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.os.Process
+import android.os.SystemClock
+import android.provider.Settings
+import android.text.InputType
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.webkit.CookieManager
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebStorage
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import androidx.core.content.ContextCompat
+import androidx.webkit.ScriptHandler
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import org.json.JSONObject
+import org.json.JSONTokener
+import java.io.ByteArrayInputStream
+
+class Tab(val web: WebView) {
+    var title = ""
+    var url = ""
+    var host: String? = null
+    var progress = 100
+    var desktop = false
+    var lazyUrl: String? = null
+    var injected = ""
+    var script: ScriptHandler? = null
+    var tts: NativeTtsBridge? = null
+}
+
+abstract class BrowserActivity : Activity() {
+    abstract val kind: Int
+    protected open val serviceClass: Class<out KeepAliveService> get() = KeepAliveService::class.java
+
+    private val ui = Handler(Looper.getMainLooper())
+    private val tabs = ArrayList<Tab>()
+    private var cur = -1
+    private val tab: Tab? get() = tabs.getOrNull(cur)
+
+    private var mode = 0      // 0 off, 1 scroll (JS), 2 swipe (touch)
+    private var speed = 2     // 1..3
+    private var paused = false
+    private var pendingUrl: String? = null
+    private var ttsState = TtsState.UNKNOWN
+    private var lastSig = ""
+    private var verifier: WebView? = null
+    private var verifying = false
+    private val stateBridge = StateBridge()
+
+    private lateinit var rootFrame: FrameLayout
+    private lateinit var webHost: FrameLayout
+    private lateinit var urlBox: EditText
+    private lateinit var lockIcon: ImageView
+    private lateinit var reloadBtn: ImageView
+    private lateinit var tabsCount: TextView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var chips: LinearLayout
+    private lateinit var pill: LinearLayout
+    private lateinit var ppBtn: ImageView
+    private lateinit var autoBtn: ImageView
+    private lateinit var speedBtn: TextView
+    private lateinit var torOverlay: LinearLayout
+    private lateinit var torTitle: TextView
+    private lateinit var torDetail: TextView
+    private lateinit var torRetry: TextView
+    private var sheet: FrameLayout? = null
+    private var sheetRefresh: (() -> Unit)? = null
+
+    private val swipeLoop = object : Runnable {
+        override fun run() {
+            if (mode == 2) {
+                if (!paused) swipeUp()
+                ui.postDelayed(this, longArrayOf(8000, 5000, 3000)[speed - 1])
+            }
+        }
+    }
+    private val fade = Runnable { pill.animate().alpha(0.25f).setDuration(400).start() }
+
+    // ───────────────────────── lifecycle ─────────────────────────
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (kind != K_NORMAL && Build.VERSION.SDK_INT < 28) {
+            Toast.makeText(this, "Incognito and Tor need Android 9 or newer", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
+        if (kind == K_NORMAL && Prefs.bool("incognitoDefault", false) &&
+            !intent.getBooleanExtra("noRedirect", false) && !intent.getBooleanExtra("checklist", false) &&
+            Build.VERSION.SDK_INT >= 28
+        ) {
+            startActivity(Intent(this, IncognitoActivity::class.java))
+            finish()
+            return
+        }
+        if (kind != K_NORMAL) {
+            window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        if (kind == K_NORMAL && Prefs.bool("clearOnExit", false) && Prefs.bool("sessionOpen", false)) clearWebData()
+        if (kind == K_NORMAL) Prefs.put("sessionOpen", "1")
+
+        mode = Prefs.int("autoMode", 0).coerceIn(0, 2)
+        speed = Prefs.int("autoSpeed", 2).coerceIn(1, 3)
+
+        buildUi()
+        applyCookiePolicy()
+
+        Bridge.onCommand = { cmd ->
+            ui.post {
+                paused = cmd == "pause"
+                tabs.forEach { it.web.evaluateJavascript(if (paused) Js.PAUSE else Js.RESUME, null) }
+                updatePill()
+            }
+        }
+        if (kind == K_TOR) initTor()
+        startKeepAlive()
+        openInitialTabs()
+        if (kind == K_NORMAL) {
+            TtsHelper.check(this) { st -> ttsState = st; updateChips() }
+            if (!Prefs.bool("firstRunDone", false) || intent.getBooleanExtra("checklist", false)) {
+                ui.postDelayed({ showChecklist() }, 600)
+            } else if (!notifOk()) {
+                requestNotif()
+            }
+        }
+        lastSig = settingsSig()
+        wake()
+        onTorChanged()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra("url")?.let { addTab(it, true) }
+        if (kind == K_NORMAL && intent.getBooleanExtra("checklist", false)) showChecklist()
+    }
+
+    private fun keepRunning() {
+        tab?.web?.onResume()
+        tab?.web?.resumeTimers()
+    }
+
+    override fun onPause() { super.onPause(); keepRunning(); saveTabs() }
+    override fun onStop() { super.onStop(); keepRunning() }
+
+    override fun onResume() {
+        super.onResume()
+        keepRunning()
+        val sig = settingsSig()
+        if (sig != lastSig) {
+            lastSig = sig
+            applySettingsAll()
+        }
+        sheetRefresh?.invoke()
+    }
+
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (sheet != null) { dismissSheet(); return }
+        val t = tab
+        when {
+            t != null && t.web.canGoBack() -> t.web.goBack()
+            tabs.size > 1 -> closeTab(cur)
+            else -> moveTaskToBack(true)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        sheetRefresh?.invoke()
+    }
+
+    override fun onDestroy() {
+        Bridge.onCommand = null
+        ui.removeCallbacksAndMessages(null)
+        val finishing = isFinishing
+        if (finishing) {
+            if (kind == K_NORMAL) {
+                if (Prefs.bool("clearOnExit", false)) clearWebData()
+                Prefs.put("sessionOpen", "0")
+            } else {
+                clearWebData()
+            }
+            stopService(Intent(this, serviceClass))
+        }
+        if (kind == K_TOR) TorManager.stop()
+        try { verifier?.destroy() } catch (_: Exception) {}
+        tabs.forEach { t ->
+            t.tts?.shutdown()
+            try { t.web.destroy() } catch (_: Exception) {}
+        }
+        super.onDestroy()
+        if (finishing && kind != K_NORMAL) Process.killProcess(Process.myPid())
+    }
+
+    private fun exitApp() {
+        finishAndRemoveTask()
+    }
+
+    // ───────────────────────── UI ─────────────────────────
+
+    private fun buildUi() {
+        rootFrame = FrameLayout(this).apply { setBackgroundColor(C.BG) }
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        chips = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        val chipScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(chips, FrameLayout.LayoutParams(WRAP, MATCH))
+        }
+        column.addView(chipScroll, LinearLayout.LayoutParams(MATCH, dp(36)))
+
+        webHost = FrameLayout(this)
+        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            visibility = View.GONE
+            progressTintList = ColorStateList.valueOf(C.GOLD)
+            progressBackgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+        }
+        torTitle = label("", 18f, C.TEXT, true).apply { gravity = Gravity.CENTER }
+        torDetail = label("", 13f, C.MUTED).apply { gravity = Gravity.CENTER; setPadding(dp(24), dp(8), dp(24), dp(16)) }
+        torRetry = label("Retry", 15f, C.BG, true).apply {
+            gravity = Gravity.CENTER
+            background = rounded(C.GOLD, 22)
+            setPadding(dp(28), dp(10), dp(28), dp(10))
+            visibility = View.GONE
+            setOnClickListener { TorManager.restart(applicationContext) }
+        }
+        torOverlay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(C.BG)
+            visibility = View.GONE
+            isClickable = true
+            addView(ImageView(context).apply {
+                setImageResource(R.drawable.ic_tor)
+                setColorFilter(C.PURPLE)
+                layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)).apply { bottomMargin = dp(12) }
+            })
+            addView(torTitle)
+            addView(torDetail)
+            addView(torRetry, LinearLayout.LayoutParams(WRAP, WRAP))
+        }
+        val webArea = FrameLayout(this)
+        webArea.addView(webHost, FrameLayout.LayoutParams(MATCH, MATCH))
+        webArea.addView(progressBar, FrameLayout.LayoutParams(MATCH, dp(3)))
+        webArea.addView(torOverlay, FrameLayout.LayoutParams(MATCH, MATCH))
+        column.addView(webArea, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        // bottom bar (one-hand use)
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(C.BAR)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        bottom.addView(iconBtn(R.drawable.ic_back) { goBack() })
+
+        lockIcon = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply { leftMargin = dp(14); rightMargin = dp(8) }
+        }
+        urlBox = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine()
+            setTextColor(C.TEXT)
+            setHintTextColor(C.MUTED)
+            textSize = 14f
+            hint = "Search or type URL"
+            background = null
+            setPadding(0, 0, dp(12), 0)
+            imeOptions = EditorInfo.IME_ACTION_GO or
+                (if (kind != K_NORMAL) EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING else 0)
+            setSelectAllOnFocus(true)
+            layoutParams = LinearLayout.LayoutParams(0, MATCH, 1f)
+            setOnEditorActionListener { v, _, _ ->
+                load(v.text.toString())
+                clearFocus()
+                hideKeyboard()
+                true
+            }
+            setOnFocusChangeListener { _, f ->
+                val u = tab?.url ?: ""
+                if (f) { setText(u); selectAll() } else setText(display(u))
+            }
+        }
+        val addressPill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(C.SURFACE2, 22)
+            addView(lockIcon)
+            addView(urlBox)
+        }
+        bottom.addView(addressPill, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
+
+        reloadBtn = iconBtn(R.drawable.ic_reload) {
+            val t = tab
+            if (t != null) { if (t.progress < 100) t.web.stopLoading() else t.web.reload() }
+        }
+        bottom.addView(reloadBtn)
+
+        tabsCount = TextView(this).apply {
+            gravity = Gravity.CENTER
+            setTextColor(C.TEXT)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            background = GradientDrawable().apply { setStroke(dp(2), C.TEXT); cornerRadius = dpf(6) }
+        }
+        val tabsWrap = FrameLayout(this).apply {
+            background = ripple(Color.TRANSPARENT, 20)
+            setOnClickListener { showTabs() }
+            addView(tabsCount, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
+        }
+        bottom.addView(tabsWrap, LinearLayout.LayoutParams(dp(40), dp(40)))
+        bottom.addView(iconBtn(R.drawable.ic_menu) { showMenu() })
+        column.addView(bottom, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        // floating control pill
+        ppBtn = iconBtn(R.drawable.ic_pause, 44, C.GOLD) { wake(); togglePlay() }
+        autoBtn = iconBtn(R.drawable.ic_auto, 44, C.MUTED) { wake(); cycleMode() }
+        speedBtn = label("×2", 14f, C.TEXT, true).apply {
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            background = ripple(Color.TRANSPARENT, 22)
+            setOnClickListener { wake(); cycleSpeed() }
+        }
+        pill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(Color.parseColor("#F01F2C47"), 28)
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            elevation = dpf(8)
+            addView(ppBtn)
+            addView(autoBtn)
+            addView(speedBtn)
+            addView(iconBtn(R.drawable.ic_next, 44, C.TEXT) { wake(); nextNow() })
+        }
+
+        rootFrame.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
+        rootFrame.addView(
+            pill,
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(76) }
+        )
+        setContentView(rootFrame)
+        updatePill()
+        updateChips()
+        updateLock()
+        updateTabsCount()
+    }
+
+    private fun hideKeyboard() {
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(urlBox.windowToken, 0)
+    }
+
+    private fun wake() {
+        pill.animate().cancel()
+        pill.alpha = 1f
+        ui.removeCallbacks(fade)
+        ui.postDelayed(fade, 3500)
+    }
+
+    private fun updatePill() {
+        ppBtn.setImageResource(if (paused) R.drawable.ic_play else R.drawable.ic_pause)
+        autoBtn.setColorFilter(if (mode == 0) C.MUTED else C.GOLD)
+        speedBtn.text = "×$speed"
+    }
+
+    private fun updateTabsCount() { tabsCount.text = tabs.size.toString() }
+
+    private fun updateLock() {
+        val u = tab?.url ?: ""
+        when {
+            kind == K_TOR -> { lockIcon.setImageResource(R.drawable.ic_tor); lockIcon.setColorFilter(C.PURPLE) }
+            kind == K_INCOG -> { lockIcon.setImageResource(R.drawable.ic_incognito); lockIcon.setColorFilter(C.PURPLE) }
+            u.startsWith("http://") -> { lockIcon.setImageResource(R.drawable.ic_lock); lockIcon.setColorFilter(C.AMBER) }
+            else -> { lockIcon.setImageResource(R.drawable.ic_lock); lockIcon.setColorFilter(C.GREEN) }
+        }
+    }
+
+    private fun updateChips() {
+        if (!::chips.isInitialized) return
+        chips.removeAllViews()
+        fun add(v: View) {
+            chips.addView(v, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(8) })
+        }
+        if (Bridge.service != null) add(chip("Running in background", C.GREEN))
+        else add(chip("Not in background · tap to start", C.AMBER) { startKeepAlive(); ui.postDelayed({ updateChips() }, 800) })
+
+        when (kind) {
+            K_TOR -> when {
+                TorManager.allowed -> add(chip("Tor verified", C.GREEN))
+                TorManager.state == TorManager.S.FAILED -> add(chip("Tor blocked", C.RED))
+                else -> add(chip("Tor connecting ${TorManager.progress}%", C.AMBER))
+            }
+            K_INCOG -> add(chip("Incognito", C.PURPLE))
+            else -> add(chip("Tor off", C.MUTED) { openTor(null) })
+        }
+        add(chip(if (mode == 0) "Auto off" else "Auto ${if (mode == 1) "scroll" else "swipe"} ×$speed", if (mode == 0) C.MUTED else C.GOLD))
+        when (ttsState) {
+            TtsState.NO_ENGINE -> add(chip("No TTS engine · tap to install", C.RED) { TtsHelper.install(this) })
+            TtsState.NO_DATA -> add(chip("TTS voice data missing · tap to install", C.RED) { TtsHelper.install(this) })
+            else -> {}
+        }
+    }
+
+    // ───────────────────────── sheets ─────────────────────────
+
+    private fun showSheet(title: String, fill: (LinearLayout) -> Unit) {
+        dismissSheet()
+        val scrim = FrameLayout(this).apply {
+            setBackgroundColor(0x99000000.toInt())
+            isClickable = true
+            setOnClickListener { dismissSheet() }
+        }
+        val r = dpf(20)
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                setColor(C.SURFACE)
+                cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+            }
+            setPadding(dp(8), dp(14), dp(8), dp(12))
+            isClickable = true
+        }
+        if (title.isNotEmpty()) {
+            panel.addView(label(title, 16f, C.TEXT, true).apply { setPadding(dp(12), 0, dp(12), dp(8)) })
+        }
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val sv = ScrollView(this).apply { addView(body) }
+        panel.addView(sv, LinearLayout.LayoutParams(MATCH, WRAP))
+        fill(body)
+        scrim.addView(panel, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        rootFrame.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+        sheet = scrim
+        sheetRefresh = { body.removeAllViews(); fill(body) }
+    }
+
+    private fun dismissSheet() {
+        sheet?.let { rootFrame.removeView(it) }
+        sheet = null
+        sheetRefresh = null
+    }
+
+    private fun showMenu() = showSheet("") { body ->
+        val t = tab
+        row(body, R.drawable.ic_add, "New tab") { dismissSheet(); newTab() }
+        if (kind == K_NORMAL) {
+            row(body, R.drawable.ic_incognito, "New incognito tab") { dismissSheet(); openIncognito(null) }
+            row(body, R.drawable.ic_tor, "New Tor tab") { dismissSheet(); openTor(null) }
+        } else {
+            row(body, R.drawable.ic_add, "New normal tab") { dismissSheet(); openNormal() }
+        }
+        row(body, R.drawable.ic_forward, "Forward") { dismissSheet(); tab?.web?.let { if (it.canGoForward()) it.goForward() } }
+        row(body, R.drawable.ic_desktop, "Desktop site", if (t?.desktop == true) "On" else "Off") {
+            dismissSheet()
+            val x = tab
+            if (x != null) { x.desktop = !x.desktop; applySettings(x); x.web.reload() }
+        }
+        if (kind == K_NORMAL && t?.host != null) {
+            val h = t.host!!
+            val on = Prefs.list("torHosts").contains(h)
+            row(body, R.drawable.ic_tor, "Always use Tor for this site", if (on) "On for $h" else "Off") {
+                dismissSheet()
+                val s = Prefs.list("torHosts")
+                if (on) s.remove(h) else s.add(h)
+                Prefs.putList("torHosts", s)
+                if (!on) openTor(t.url)
+            }
+        }
+        if (kind == K_NORMAL) row(body, R.drawable.ic_history, "History") { showHistory() }
+        row(body, R.drawable.ic_settings, "Settings") { dismissSheet(); startActivity(Intent(this, SettingsActivity::class.java)) }
+        row(body, R.drawable.ic_trash, "Clear data", if (kind == K_NORMAL) "Cookies, cache, site data, history" else "Wipe this private session") {
+            dismissSheet()
+            AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Clear data?")
+                .setMessage(if (kind == K_NORMAL) "Cookies, cache, site data and history will be deleted." else "Everything in this private session will be wiped.")
+                .setPositiveButton("Clear") { _, _ -> clearBrowsingData() }
+                .setNegativeButton("Cancel", null).show()
+        }
+        if (kind == K_NORMAL) row(body, R.drawable.ic_check, "Setup checklist") { showChecklist() }
+        row(body, R.drawable.ic_exit, "Exit", "Stop background service and close", C.RED) { dismissSheet(); exitApp() }
+    }
+
+    private fun showTabs() = showSheet("Tabs") { body ->
+        for ((i, t) in tabs.withIndex()) {
+            val closeBtn = ImageView(this).apply {
+                setImageResource(R.drawable.ic_close)
+                setColorFilter(C.MUTED)
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+                setOnClickListener { closeTab(i); if (sheet != null) sheetRefresh?.invoke() }
+            }
+            row(body, null, t.title.ifBlank { "New tab" }, display(t.url).ifBlank { "blank" },
+                tint = if (i == cur) C.GOLD else C.TEXT, trailing = closeBtn) { dismissSheet(); selectTab(i) }
+        }
+        row(body, R.drawable.ic_add, "New tab") { dismissSheet(); newTab() }
+        if (kind == K_NORMAL) {
+            row(body, R.drawable.ic_incognito, "New incognito tab") { dismissSheet(); openIncognito(null) }
+            row(body, R.drawable.ic_tor, "New Tor tab") { dismissSheet(); openTor(null) }
+        }
+    }
+
+    private fun showHistory() = showSheet("History") { body ->
+        val items = History.items(60)
+        if (items.isEmpty()) row(body, null, "No history yet")
+        for (h in items) {
+            row(body, null, h.title.ifBlank { h.url }, display(h.url)) {
+                dismissSheet()
+                tab?.let { loadIn(it, h.url) }
+            }
+        }
+    }
+
+    private fun showChecklist() = showSheet("Setup checklist") { body ->
+        fun item(title: String, sub: String, done: Boolean, act: () -> Unit) {
+            val mark = ImageView(this).apply {
+                setImageResource(R.drawable.ic_check)
+                setColorFilter(if (done) C.GREEN else C.SURFACE2)
+                layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
+            }
+            row(body, null, title, sub, trailing = mark, onClick = act)
+        }
+        item("Notifications", "Media controls in the notification", notifOk()) { requestNotif() }
+        item("Unrestricted battery", "Stops Android from freezing the page",
+            (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            } catch (_: Exception) {}
+        }
+        item("Launch on boot", "Needs “Display over other apps”", Settings.canDrawOverlays(this)) {
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            } catch (_: Exception) {}
+        }
+        item("Tor (optional)", "Tap to open a Tor tab and test it", false) { dismissSheet(); openTor(null) }
+        row(body, null, "Done", null, C.GOLD) {
+            Prefs.put("firstRunDone", "1")
+            dismissSheet()
+        }
+    }
+
+    private fun notifOk() = Build.VERSION.SDK_INT < 33 ||
+        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    private fun requestNotif() {
+        if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+    }
+
+    // ───────────────────────── tabs ─────────────────────────
+
+    private fun openInitialTabs() {
+        val extra = intent.getStringExtra("url")
+        if (kind == K_NORMAL) {
+            val saved = Prefs.str("tabs", "").split("\n").filter { it.isNotBlank() }
+            for (u in saved) {
+                val t = addTab(null, false)
+                t.lazyUrl = u
+                t.url = u
+            }
+            if (extra != null) { addTab(extra, true); return }
+            if (tabs.isNotEmpty()) { selectTab(Prefs.int("tabIdx", 0).coerceIn(0, tabs.size - 1)); return }
+        }
+        addTab(extra ?: homeUrl(), true)
+    }
+
+    private fun saveTabs() {
+        if (kind != K_NORMAL || tabs.isEmpty()) return
+        Prefs.put("tabs", tabs.map { if (it.url.isBlank()) (it.lazyUrl ?: "") else it.url }.filter { it.isNotBlank() }.joinToString("\n"))
+        Prefs.put("tabIdx", cur)
+    }
+
+    private fun addTab(url: String?, select: Boolean): Tab {
+        val t = Tab(newWeb())
+        t.desktop = Prefs.bool("desktop", false)
+        tabs.add(t)
+        applySettings(t)
+        installScripts(t)
+        if (select) selectTab(tabs.size - 1) else updateTabsCount()
+        if (url != null) load(url)
+        return t
+    }
+
+    private fun newTab() {
+        if (kind == K_NORMAL && Prefs.bool("incognitoDefault", false)) openIncognito(null) else addTab(homeUrl(), true)
+    }
+
+    private fun selectTab(i: Int) {
+        if (i !in tabs.indices) return
+        cur = i
+        val t = tabs[i]
+        webHost.removeAllViews()
+        (t.web.parent as? ViewGroup)?.removeView(t.web)
+        webHost.addView(t.web, FrameLayout.LayoutParams(MATCH, MATCH))
+        t.web.requestFocus()
+        t.lazyUrl?.let { t.lazyUrl = null; loadIn(t, it) }
+        urlBox.setText(display(t.url))
+        applySiteState(t.host)
+        applyAuto()
+        progressBar.visibility = if (t.progress in 1..99) View.VISIBLE else View.GONE
+        reloadBtn.setImageResource(if (t.progress < 100) R.drawable.ic_close else R.drawable.ic_reload)
+        updateLock()
+        updateTabsCount()
+    }
+
+    private fun closeTab(i: Int) {
+        if (i !in tabs.indices) return
+        val t = tabs.removeAt(i)
+        webHost.removeView(t.web)
+        try { t.script?.remove() } catch (_: Exception) {}
+        t.tts?.shutdown()
+        try { t.web.destroy() } catch (_: Exception) {}
+        if (tabs.isEmpty()) {
+            cur = -1
+            if (kind == K_NORMAL) addTab(homeUrl(), true) else finish()
+            return
+        }
+        val n = when {
+            i < cur -> cur - 1
+            i == cur -> minOf(i, tabs.size - 1)
+            else -> cur
+        }
+        selectTab(n)
+    }
+
+    private fun goBack() {
+        val t = tab
+        if (t != null && t.web.canGoBack()) t.web.goBack() else if (tabs.size > 1) closeTab(cur)
+    }
+
+    private fun tabOf(v: WebView?): Tab? = tabs.firstOrNull { it.web === v }
+
+    // ───────────────────────── web ─────────────────────────
+
+    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
+    private fun newWeb(): WebView {
+        val w = WebView(this)
+        w.setBackgroundColor(C.BG)
+        w.isFocusableInTouchMode = true
+        if (kind != K_NORMAL) w.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+        w.addJavascriptInterface(stateBridge, "BgState")
+        w.webViewClient = client
+        w.webChromeClient = chrome
+        w.setOnTouchListener { _, _ -> wake(); false }
+        w.setDownloadListener { url, _, _, _, _ ->
+            if (kind == K_NORMAL) {
+                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) {}
+            } else {
+                Toast.makeText(this, "Downloads aren't supported in private tabs", Toast.LENGTH_SHORT).show()
+            }
+        }
+        return w
+    }
+
+    private fun httpsOnlyNow() = kind == K_TOR || Prefs.bool("httpsOnly", false)
+    private fun canLoad() = kind != K_TOR || TorManager.allowed
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun applySettings(t: Tab) {
+        val s = t.web.settings
+        s.javaScriptEnabled = Prefs.bool("js", true)
+        s.domStorageEnabled = true
+        s.mediaPlaybackRequiresUserGesture = false
+        s.mixedContentMode = if (httpsOnlyNow()) WebSettings.MIXED_CONTENT_NEVER_ALLOW
+        else WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        s.builtInZoomControls = true
+        s.displayZoomControls = false
+        s.textZoom = Prefs.int("textSize", 100)
+        s.setSupportMultipleWindows(false)
+        s.allowFileAccess = false
+        s.allowContentAccess = false
+        s.setGeolocationEnabled(false)
+        if (kind != K_NORMAL) {
+            @Suppress("DEPRECATION")
+            s.saveFormData = false
+            s.cacheMode = WebSettings.LOAD_NO_CACHE
+            s.setSafeBrowsingEnabled(false)
+        }
+        val ua = Prefs.str("ua", "")
+        s.userAgentString = when {
+            ua.isNotBlank() -> ua
+            t.desktop -> desktopUa()
+            else -> null
+        }
+        s.useWideViewPort = t.desktop
+        s.loadWithOverviewMode = t.desktop
+        CookieManager.getInstance().setAcceptThirdPartyCookies(
+            t.web, !(kind == K_TOR || Prefs.bool("cookies3p", false))
+        )
+    }
+
+    private fun desktopUa(): String {
+        val d = WebSettings.getDefaultUserAgent(this)
+        return d.replace(Regex("\\(Linux; Android[^)]*\\)"), "(X11; Linux x86_64)")
+            .replace(" Mobile", "").replace("Version/4.0 ", "")
+    }
+
+    private fun applyCookiePolicy() {
+        val cm = CookieManager.getInstance()
+        cm.setAcceptCookie(if (kind == K_TOR) Prefs.bool("torCookies", false) else Prefs.bool("cookies", true))
+        tabs.forEach { applySettings(it) }
+    }
+
+    private fun installScripts(t: Tab) {
+        try { t.script?.remove() } catch (_: Exception) {}
+        t.script = null
+        val sb = StringBuilder(Js.KEEPALIVE)
+        if (kind == K_TOR) sb.append('\n').append(Js.NO_WEBRTC)
+        val nativeTts = Prefs.bool("nativeTts", false)
+        t.web.removeJavascriptInterface("BgTts")
+        if (nativeTts) {
+            sb.append('\n').append(Js.TTS_SHIM)
+            val bridge = t.tts ?: NativeTtsBridge(this) { js -> ui.post { t.web.evaluateJavascript(js, null) } }
+            t.tts = bridge
+            t.web.addJavascriptInterface(bridge, "BgTts")
+        }
+        t.injected = sb.toString()
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            t.script = WebViewCompat.addDocumentStartJavaScript(t.web, t.injected, setOf("*"))
+        }
+    }
+
+    private fun settingsSig(): String =
+        listOf("js", "desktop", "ua", "textSize", "httpsOnly", "cookies", "cookies3p", "nativeTts",
+            "autoNext", "autoNextSel", "torCookies", "keepAlive", "engine")
+            .joinToString("|") { Prefs.str(it, "") }
+
+    private fun applySettingsAll() {
+        applyCookiePolicy()
+        tabs.forEach { installScripts(it) }
+        tab?.web?.reload()
+        if (Prefs.bool("keepAlive", true)) startKeepAlive() else stopService(Intent(this, serviceClass))
+        ui.postDelayed({ updateChips() }, 600)
+    }
+
+    private fun blockedResponse() =
+        WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+
+    private val client = object : WebViewClient() {
+        override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
+            val u = r.url
+            val scheme = u.scheme ?: return false
+            if (scheme == "http" && httpsOnlyNow()) {
+                if (r.isForMainFrame) v.loadUrl(u.buildUpon().scheme("https").build().toString())
+                return true
+            }
+            if (scheme != "http" && scheme != "https") {
+                if (scheme == "about" || scheme == "data" || scheme == "blob" || scheme == "javascript") return false
+                if (kind == K_NORMAL) {
+                    try { startActivity(Intent(Intent.ACTION_VIEW, u)) } catch (_: Exception) {}
+                }
+                return true
+            }
+            if (kind == K_NORMAL && r.isForMainFrame) {
+                val h = u.host
+                if (h != null && Prefs.list("torHosts").contains(h)) { openTor(u.toString()); return true }
+            }
+            return false
+        }
+
+        override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
+            val sc = r.url.scheme ?: return null
+            val block = (kind == K_TOR && !TorManager.allowed) || (sc == "http" && httpsOnlyNow())
+            return if (block) blockedResponse() else null
+        }
+
+        override fun onPageStarted(v: WebView, url: String?, f: Bitmap?) {
+            val t = tabOf(v) ?: return
+            t.url = url ?: ""
+            v.evaluateJavascript(t.injected, null)
+            if (t === tab) {
+                if (!urlBox.hasFocus()) urlBox.setText(display(t.url))
+                updateLock()
+            }
+            val h = hostOf(url)
+            if (h != t.host) {
+                t.host = h
+                if (t === tab) { applySiteState(h); applyAuto() }
+            }
+        }
+
+        override fun onPageFinished(v: WebView, url: String?) {
+            val t = tabOf(v) ?: return
+            v.evaluateJavascript(t.injected, null)
+            if (t === tab) v.evaluateJavascript(autoJs(), null)
+            if (kind == K_NORMAL && Prefs.bool("saveHistory", true) && url != null) History.add(url, v.title ?: "")
+        }
+    }
+
+    private val chrome = object : WebChromeClient() {
+        override fun onProgressChanged(v: WebView, p: Int) {
+            val t = tabOf(v) ?: return
+            t.progress = p
+            if (t === tab) {
+                progressBar.visibility = if (p in 1..99) View.VISIBLE else View.GONE
+                progressBar.progress = p
+                reloadBtn.setImageResource(if (p < 100) R.drawable.ic_close else R.drawable.ic_reload)
+            }
+        }
+
+        override fun onReceivedTitle(v: WebView, title: String?) {
+            val t = tabOf(v) ?: return
+            t.title = title ?: ""
+            if (t === tab && kind == K_NORMAL) Bridge.service?.updateMeta(title)
+        }
+
+        override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
+    }
+
+    // ───────────────────────── navigation ─────────────────────────
+
+    private fun homeUrl(): String =
+        if (kind == K_TOR) "https://duckduckgo.com/"
+        else Prefs.str("home", "").ifBlank { "https://www.google.com" }
+
+    private fun searchBase(): String {
+        val e = if (kind == K_TOR) "ddg" else Prefs.str("engine", "google")
+        return when (e) {
+            "ddg" -> "https://duckduckgo.com/?q="
+            "brave" -> "https://search.brave.com/search?q="
+            "startpage" -> "https://www.startpage.com/do/search?q="
+            else -> "https://www.google.com/search?q="
+        }
+    }
+
+    private fun normalize(s: String): String = when {
+        s.startsWith("http://") || s.startsWith("https://") -> s
+        s.contains(" ") || (!s.contains(".") && !s.contains(":")) -> searchBase() + Uri.encode(s)
+        else -> "https://$s"
+    }
+
+    private fun load(input: String) {
+        val s = input.trim()
+        if (s.isEmpty()) return
+        val t = tab ?: return
+        loadIn(t, normalize(s))
+    }
+
+    private fun loadIn(t: Tab, raw: String) {
+        var url = raw
+        if (httpsOnlyNow() && url.startsWith("http://")) url = "https://" + url.substring(7)
+        if (kind == K_NORMAL) {
+            val h = hostOf(url)
+            if (h != null && Prefs.list("torHosts").contains(h)) { openTor(url); return }
+        }
+        if (!canLoad()) { pendingUrl = url; return }
+        t.web.loadUrl(url)
+    }
+
+    private fun hostOf(url: String?): String? = try { if (url == null) null else Uri.parse(url).host } catch (_: Exception) { null }
+
+    private fun display(u: String): String =
+        if (u.startsWith("data:")) "" else u.removePrefix("https://").removePrefix("http://").removeSuffix("/")
+
+    private fun openIncognito(url: String?) {
+        if (Build.VERSION.SDK_INT < 28) {
+            Toast.makeText(this, "Incognito needs Android 9 or newer", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startActivity(Intent(this, IncognitoActivity::class.java).apply { if (url != null) putExtra("url", url) })
+    }
+
+    private fun openTor(url: String?) {
+        if (Build.VERSION.SDK_INT < 28) {
+            Toast.makeText(this, "Tor tabs need Android 9 or newer", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startActivity(Intent(this, TorActivity::class.java).apply { if (url != null) putExtra("url", url) })
+    }
+
+    private fun openNormal() {
+        startActivity(Intent(this, MainActivity::class.java).putExtra("noRedirect", true))
+    }
+
+    // ───────────────────────── auto mode ─────────────────────────
+
+    private fun applySiteState(host: String?) {
+        var m = Prefs.int("autoMode", 0)
+        var sp = Prefs.int("autoSpeed", 2)
+        if (kind == K_NORMAL && host != null && Prefs.bool("rememberSite", true)) {
+            val p = Prefs.str("site.$host", "").split(",")
+            if (p.size == 2) { m = p[0].toIntOrNull() ?: m; sp = p[1].toIntOrNull() ?: sp }
+        }
+        mode = m.coerceIn(0, 2)
+        speed = sp.coerceIn(1, 3)
+    }
+
+    private fun saveSite() {
+        val h = tab?.host
+        if (kind == K_NORMAL && h != null && Prefs.bool("rememberSite", true)) Prefs.put("site.$h", "$mode,$speed")
+    }
+
+    private fun autoJs(): String {
+        val sel = Prefs.str("autoNextSel", "")
+        return Js.AUTO
+            .replace("__SEL__", JSONObject.quote(sel))
+            .replace("__PAUSED__", paused.toString())
+            .replace("__ON__", (mode == 1).toString())
+            .replace("__PX__", intArrayOf(3, 6, 12)[speed - 1].toString())
+            .replace("__CLICK__", Prefs.bool("autoNext", true).toString())
+    }
+
+    private fun applyAuto() {
+        ui.removeCallbacks(swipeLoop)
+        tab?.web?.evaluateJavascript(autoJs(), null)
+        if (mode == 2) ui.postDelayed(swipeLoop, 2000)
+        updatePill()
+        updateChips()
+    }
+
+    private fun cycleMode() { mode = (mode + 1) % 3; saveSite(); applyAuto() }
+    private fun cycleSpeed() { speed = speed % 3 + 1; saveSite(); applyAuto() }
+
+    private fun togglePlay() {
+        val s = Bridge.service
+        if (s != null) s.toggle() else Bridge.onCommand?.invoke(if (paused) "resume" else "pause")
+    }
+
+    private fun nextNow() {
+        val sel = JSONObject.quote(Prefs.str("autoNextSel", ""))
+        tab?.web?.evaluateJavascript("window.__bgSel=$sel;window.__bgNext&&window.__bgNext()", null)
+    }
+
+    // Real touch swipe (works while the screen is on).
+    private fun swipeUp() {
+        val w = tab?.web ?: return
+        val x = w.width / 2f
+        val y0 = w.height * 0.75f
+        val y1 = w.height * 0.25f
+        val start = SystemClock.uptimeMillis()
+        val steps = 10
+        fun send(action: Int, y: Float) {
+            val e = MotionEvent.obtain(start, SystemClock.uptimeMillis(), action, x, y, 0)
+            w.dispatchTouchEvent(e)
+            e.recycle()
+        }
+        send(MotionEvent.ACTION_DOWN, y0)
+        for (i in 1..steps) ui.postDelayed({ send(MotionEvent.ACTION_MOVE, y0 + (y1 - y0) * i / steps) }, i * 20L)
+        ui.postDelayed({ send(MotionEvent.ACTION_UP, y1) }, (steps + 1) * 20L)
+    }
+
+    // ───────────────────────── data wiping ─────────────────────────
+
+    private fun clearWebData() {
+        try {
+            val cm = CookieManager.getInstance()
+            cm.removeAllCookies(null)
+            cm.flush()
+            WebStorage.getInstance().deleteAllData()
+        } catch (_: Exception) {}
+        tabs.forEach {
+            try { it.web.clearCache(true); it.web.clearFormData(); it.web.clearHistory() } catch (_: Exception) {}
+        }
+    }
+
+    private fun clearBrowsingData() {
+        clearWebData()
+        if (kind == K_NORMAL) History.clear()
+        Toast.makeText(this, "Cleared", Toast.LENGTH_SHORT).show()
+    }
+
+    // ───────────────────────── keep-alive ─────────────────────────
+
+    private fun startKeepAlive() {
+        if (Prefs.bool("keepAlive", true)) {
+            try { ContextCompat.startForegroundService(this, Intent(this, serviceClass)) } catch (_: Exception) {}
+        }
+    }
+
+    // ───────────────────────── Tor ─────────────────────────
+
+    private fun initTor() {
+        TorManager.listener = { ui.post { onTorChanged() } }
+        val ok = WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        if (!ok) {
+            TorManager.fail("This WebView can't proxy or inject scripts. Update “Android System WebView”.", false)
+            return
+        }
+        TorManager.begin(applicationContext)
+    }
+
+    private fun onTorChanged() {
+        if (kind != K_TOR || !::torOverlay.isInitialized) { updateChips(); return }
+        val s = TorManager.state
+        if (s == TorManager.S.READY && !TorManager.verified && !verifying) startVerify()
+        val blocked = !TorManager.allowed
+        torOverlay.visibility = if (blocked) View.VISIBLE else View.GONE
+        torTitle.text = when (s) {
+            TorManager.S.FAILED -> "Tor is blocked"
+            TorManager.S.READY -> "Verifying Tor…"
+            else -> "Connecting to Tor…"
+        }
+        torDetail.text = TorManager.detail + "\nNothing loads until Tor is verified. There is no fallback to the normal internet."
+        torRetry.visibility = if (s == TorManager.S.FAILED) View.VISIBLE else View.GONE
+        if (!blocked) {
+            pendingUrl?.let { u -> pendingUrl = null; tab?.web?.loadUrl(u) }
+        }
+        updateChips()
+    }
+
+    /** Loads check.torproject.org through the proxy in a hidden WebView and reads IsTor. */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun startVerify() {
+        verifying = true
+        val v = WebView(this)
+        v.settings.javaScriptEnabled = true
+        v.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+        verifier = v
+        rootFrame.addView(v, FrameLayout.LayoutParams(1, 1))
+        v.alpha = 0f
+        v.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(w: WebView, url: String?) {
+                w.evaluateJavascript("document.body?document.body.innerText:''") { raw ->
+                    var isTor = false
+                    try {
+                        val s = JSONTokener(raw ?: "").nextValue() as? String ?: ""
+                        isTor = JSONObject(s).optBoolean("IsTor", false)
+                    } catch (_: Exception) {}
+                    finishVerify(isTor, "check.torproject.org says this traffic is NOT coming through Tor")
+                }
+            }
+            override fun onReceivedError(w: WebView, r: WebResourceRequest, e: android.webkit.WebResourceError) {
+                if (r.isForMainFrame) finishVerify(false, "Could not reach check.torproject.org through Tor")
+            }
+        }
+        v.loadUrl("https://check.torproject.org/api/ip")
+        ui.postDelayed({ if (verifying) finishVerify(false, "Tor check timed out") }, 60000)
+    }
+
+    private fun finishVerify(ok: Boolean, msg: String) {
+        if (!verifying) return
+        verifying = false
+        verifier?.let {
+            rootFrame.removeView(it)
+            try { it.destroy() } catch (_: Exception) {}
+        }
+        verifier = null
+        TorManager.setVerified(ok, msg)
+    }
+}

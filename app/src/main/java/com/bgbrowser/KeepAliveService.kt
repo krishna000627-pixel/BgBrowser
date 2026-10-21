@@ -13,34 +13,45 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 
+/** One Bridge per process (main, :incognito, :tor each have their own). */
 object Bridge {
     @Volatile var service: KeepAliveService? = null
     @Volatile var onCommand: ((String) -> Unit)? = null
 }
 
-class KeepAliveService : Service() {
+open class KeepAliveService : Service() {
     companion object {
         const val CH = "bg_browser"
-        const val ID = 42
         const val ACTION_TOGGLE = "com.bgbrowser.TOGGLE"
     }
 
+    protected open val notifId: Int get() = 42
+    protected open val sessionName: String get() = "BgBrowser"
+    protected open val privateMode: Boolean get() = false
+    protected open val activityClass: Class<*> get() = MainActivity::class.java
+
+    private val main = Handler(Looper.getMainLooper())
     private lateinit var session: MediaSessionCompat
     private var track: AudioTrack? = null
     @Volatile private var running = false
     private var wake: PowerManager.WakeLock? = null
     private var wifi: WifiManager.WifiLock? = null
     private var playing = true
+    private var speaking = false
     private var title = "Background Browser"
 
     override fun onBind(i: Intent?): IBinder? = null
+
+    fun isPlaying(): Boolean = playing
 
     override fun onCreate() {
         super.onCreate()
@@ -48,8 +59,7 @@ class KeepAliveService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH, "Background browsing", NotificationManager.IMPORTANCE_LOW))
 
-        // The "fake" media session the web page never registers itself.
-        session = MediaSessionCompat(this, "BgBrowser").apply {
+        session = MediaSessionCompat(this, sessionName).apply {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() { setPlaying(true); Bridge.onCommand?.invoke("resume") }
                 override fun onPause() { setPlaying(false); Bridge.onCommand?.invoke("pause") }
@@ -60,9 +70,9 @@ class KeepAliveService : Service() {
         pushState()
 
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            startForeground(notifId, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
         } else {
-            startForeground(ID, buildNotification())
+            startForeground(notifId, buildNotification())
         }
 
         acquireLocks()
@@ -70,31 +80,50 @@ class KeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_TOGGLE) {
-            val p = !playing
-            setPlaying(p)
-            Bridge.onCommand?.invoke(if (p) "resume" else "pause")
-        }
+        if (intent?.action == ACTION_TOGGLE) toggle()
         return START_STICKY
     }
 
+    /** Play/pause from the notification or the floating pill. */
+    fun toggle() {
+        val p = !playing
+        setPlaying(p)
+        Bridge.onCommand?.invoke(if (p) "resume" else "pause")
+    }
+
     fun updateMeta(t: String?) {
-        if (t.isNullOrBlank()) return
-        title = t
-        pushState()
-        getSystemService(NotificationManager::class.java).notify(ID, buildNotification())
+        if (privateMode || t.isNullOrBlank()) return
+        main.post {
+            title = t
+            pushState()
+            notifyNow()
+        }
+    }
+
+    /** Page speech state reported by the injected script: keeps the session in sync with speechSynthesis. */
+    fun onSpeech(isSpeaking: Boolean, isPaused: Boolean) {
+        main.post {
+            speaking = isSpeaking
+            if (isSpeaking) playing = !isPaused
+            pushState()
+            notifyNow()
+        }
     }
 
     private fun setPlaying(p: Boolean) {
         playing = p
         pushState()
-        getSystemService(NotificationManager::class.java).notify(ID, buildNotification())
+        notifyNow()
+    }
+
+    private fun notifyNow() {
+        getSystemService(NotificationManager::class.java).notify(notifId, buildNotification())
     }
 
     private fun pushState() {
         session.setMetadata(
             MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, if (privateMode) "Private session" else title)
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "BG Browser")
                 .build()
         )
@@ -114,20 +143,21 @@ class KeepAliveService : Service() {
 
     private fun buildNotification(): Notification {
         val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            this, 0, Intent(this, activityClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val toggle = PendingIntent.getService(
-            this, 1, Intent(this, KeepAliveService::class.java).setAction(ACTION_TOGGLE),
+            this, 1, Intent(this, javaClass).setAction(ACTION_TOGGLE),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val text = if (speaking) "Reading aloud · running in background" else "Running in background"
         return NotificationCompat.Builder(this, CH)
-            .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle(title)
-            .setContentText("Running in background")
+            .setSmallIcon(R.drawable.ic_wave)
+            .setContentTitle(if (privateMode) "Private session" else title)
+            .setContentText(text)
             .setContentIntent(open)
             .setOngoing(true)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(if (privateMode) NotificationCompat.VISIBILITY_PRIVATE else NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
                 if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 if (playing) "Pause" else "Play", toggle
@@ -142,12 +172,16 @@ class KeepAliveService : Service() {
 
     @Suppress("DEPRECATION")
     private fun acquireLocks() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "bgbrowser:wake").apply { acquire() }
-        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-        else WifiManager.WIFI_MODE_FULL_HIGH_PERF
-        wifi = wm.createWifiLock(mode, "bgbrowser:wifi").apply { acquire() }
+        if (Prefs.bool("wakeLock", true)) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "bgbrowser:wake").apply { acquire() }
+        }
+        if (Prefs.bool("wifiLock", true)) {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            else WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifi = wm.createWifiLock(mode, "bgbrowser:wifi").apply { acquire() }
+        }
     }
 
     // Inaudible audio stream so the system always sees an active media player.
@@ -189,4 +223,18 @@ class KeepAliveService : Service() {
         Bridge.service = null
         super.onDestroy()
     }
+}
+
+class IncognitoKeepService : KeepAliveService() {
+    override val notifId: Int get() = 44
+    override val sessionName: String get() = "BgBrowserIncognito"
+    override val privateMode: Boolean get() = true
+    override val activityClass: Class<*> get() = IncognitoActivity::class.java
+}
+
+class TorKeepService : KeepAliveService() {
+    override val notifId: Int get() = 45
+    override val sessionName: String get() = "BgBrowserTor"
+    override val privateMode: Boolean get() = true
+    override val activityClass: Class<*> get() = TorActivity::class.java
 }
