@@ -5,7 +5,7 @@ Paste this file and the latest `BgBrowser_vN.zip` at the start of the next chat.
 ## What the app is
 Android browser (Kotlin, WebView, no Compose) that keeps a web page running in the background, mainly sites that read text aloud (web TTS) and auto-scroll/auto-next. The page never registers a media session, so the app does it for the page.
 
-## Current state (v4)
+## Current state (v5)
 - Package `com.bgbrowser`, minSdk 26, target/compile 34, AGP 8.5.2, Kotlin 1.9.24, Gradle 8.10.2 in CI. Tor: `info.guardianproject:tor-android:0.4.8.17.2` + `jtorctl:0.4.5.7` (driven by reflection in `TorManager.kt`, so only dependency resolution can break the build; 0.4.8.12 does not exist on Maven Central or Google, so v4 moved to 0.4.8.17.2; if resolution fails again check central.sonatype.com for a listed version).
 - Three processes, one `BrowserActivity` base: `MainActivity` (normal), `IncognitoActivity` (`:incognito`), `TorActivity` (`:tor`). Each has its own WebView data dir suffix (wiped in `App.onCreate`), its own `KeepAliveService` subclass and its own `Bridge`. Incognito/Tor need Android 9+.
 - `Prefs.kt`: file-backed settings readable from all processes. `History.kt`: simple history (normal mode only).
