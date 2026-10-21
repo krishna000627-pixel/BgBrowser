@@ -61,6 +61,7 @@
             android:windowSoftInputMode="adjustResize"/>
 
         <activity android:name=".SettingsActivity" android:exported="false" android:label="Settings"/>
+        <activity android:name=".WelcomeActivity" android:exported="false" android:label="Welcome"/>
 
         <service
             android:name=".KeepAliveService"

@@ -27,10 +27,12 @@ import android.widget.Toast
 class SettingsActivity : Activity() {
     private lateinit var col: LinearLayout
     private var testTts: TextToSpeech? = null
+    private var page = "home"
     private lateinit var ttsStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        page = intent.getStringExtra("page") ?: "home"
         val sv = ScrollView(this).apply { setBackgroundColor(C.BG) }
         col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -41,7 +43,7 @@ class SettingsActivity : Activity() {
 
         val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         top.addView(iconBtn(R.drawable.ic_back) { finish() })
-        top.addView(label("Settings", 22f, C.TEXT, true).apply { setPadding(dp(8), 0, 0, 0) })
+        top.addView(label(pageTitle(), 22f, C.TEXT, true).apply { setPadding(dp(8), 0, 0, 0) })
         col.addView(top)
         build()
     }
@@ -166,6 +168,20 @@ class SettingsActivity : Activity() {
         card.addView(label(text, 12f, C.MUTED).apply { setPadding(dp(12), dp(8), dp(12), dp(10)) })
     }
 
+    private fun pageTitle() = when (page) {
+        "browsing" -> "Browsing"
+        "controls" -> "Controls & display"
+        "privacy" -> "Privacy & cookies"
+        "auto" -> "Auto mode"
+        "background" -> "Background"
+        "tts" -> "Text-to-speech"
+        "tor" -> "Tor"
+        "about" -> "About"
+        else -> "Settings"
+    }
+
+    private fun open(p: String) = startActivity(Intent(this, SettingsActivity::class.java).putExtra("page", p))
+
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
     private fun clearCookies() {
@@ -179,10 +195,39 @@ class SettingsActivity : Activity() {
         try { val w = WebView(applicationContext); w.clearCache(true); w.destroy() } catch (_: Exception) {}
     }
 
-    // ───────── sections ─────────
+    // ───────── pages ─────────
 
     private fun build() {
-        var c = section("Browsing")
+        when (page) {
+            "browsing" -> buildBrowsing()
+            "controls" -> buildControls()
+            "privacy" -> buildPrivacy()
+            "auto" -> buildAuto()
+            "background" -> buildBackground()
+            "tts" -> buildTts()
+            "tor" -> buildTor()
+            "about" -> buildAbout()
+            else -> buildHome()
+        }
+    }
+
+    private fun buildHome() {
+        val c = section("Categories")
+        fun item(icon: Int, title: String, sub: String, p: String) {
+            row(c, icon, title, sub, trailing = label("›", 22f, C.MUTED)) { open(p) }
+        }
+        item(R.drawable.ic_desktop, "Browsing", "Search engine, home page, desktop site, text size", "browsing")
+        item(R.drawable.ic_play, "Controls & display", "Floating pill, status chips, screen, tabs", "controls")
+        item(R.drawable.ic_lock, "Privacy & cookies", "Cookies, history, incognito, cache", "privacy")
+        item(R.drawable.ic_auto, "Auto mode", "Scroll, swipe, speed, auto-next", "auto")
+        item(R.drawable.ic_pause, "Background", "Keep-alive, battery, boot", "background")
+        item(R.drawable.ic_wave, "Text-to-speech", "Voice data, test, native bridge", "tts")
+        item(R.drawable.ic_tor, "Tor", "Cookies, always-Tor sites", "tor")
+        item(R.drawable.ic_settings, "About", "Version, help, reset", "about")
+    }
+
+    private fun buildBrowsing() {
+        val c = section("Browsing")
         choiceRow(c, "Search engine", "engine", listOf("Google", "DuckDuckGo", "Brave", "Startpage"),
             listOf("google", "ddg", "brave", "startpage"), "google")
         textRow(c, "Home page", "home", "https://www.google.com", "")
@@ -192,8 +237,24 @@ class SettingsActivity : Activity() {
         choiceRow(c, "Text size", "textSize", listOf("80%", "90%", "100%", "115%", "130%", "150%"),
             listOf("80", "90", "100", "115", "130", "150"), "100")
         switchRow(c, "HTTPS-only", "Upgrade http links, block insecure requests", "httpsOnly", false)
+    }
 
-        c = section("Cookies")
+    private fun buildControls() {
+        var c = section("Floating pill")
+        switchRow(c, "Show control pill", "Play/pause, auto mode, speed and next on top of the page. Off by default.", "showPill", false)
+        switchRow(c, "Fade when idle", "Dim the pill a few seconds after you touch the page", "pillFade", true)
+        note(c, "With the pill off, the same controls are at the top of the menu.")
+
+        c = section("Display")
+        switchRow(c, "Show status chips", "Background, Tor, auto and voice status above the page", "showChips", true)
+        switchRow(c, "Keep screen on", "Stops the screen from turning off while the browser is open", "keepScreenOn", false)
+
+        c = section("Tabs")
+        switchRow(c, "Restore tabs on start", "Reopen the tabs you had open last time", "restoreTabs", true)
+    }
+
+    private fun buildPrivacy() {
+        var c = section("Cookies")
         switchRow(c, "Accept cookies", null, "cookies", true)
         switchRow(c, "Block third-party cookies", null, "cookies3p", false)
         switchRow(c, "Clear cookies on exit", "Also wipes site data after a crash or swipe-away", "clearOnExit", false)
@@ -205,16 +266,21 @@ class SettingsActivity : Activity() {
         buttonRow(c, "Clear history", null, C.RED) { History.clear(); toast("History cleared") }
         buttonRow(c, "Clear cache", null, C.RED) { clearCache(); toast("Cache cleared") }
         note(c, "Incognito and Tor tabs run in their own process with separate storage. It is wiped when you close them and again at next start. Screenshots are blocked in them.")
+    }
 
-        c = section("Auto mode")
+    private fun buildAuto() {
+        val c = section("Auto mode")
         choiceRow(c, "Default mode", "autoMode", listOf("Off", "Scroll", "Swipe"), listOf("0", "1", "2"), "0")
         choiceRow(c, "Default speed", "autoSpeed", listOf("1 · slow", "2 · medium", "3 · fast"), listOf("1", "2", "3"), "2")
         switchRow(c, "Remember per site", "Mode and speed are saved for each site", "rememberSite", true)
         switchRow(c, "Click “next” at page end", null, "autoNext", true)
         textRow(c, "Custom “next” selector", "autoNextSel", "CSS selector, e.g. a.next-chapter", "")
         buttonRow(c, "Forget remembered sites", null) { Prefs.removePrefix("site."); toast("Done") }
+        note(c, "Swipe mode only works with the screen on. Scroll mode works with it off.")
+    }
 
-        c = section("Background")
+    private fun buildBackground() {
+        val c = section("Background")
         switchRow(c, "Keep running in background", "Foreground service with fake media session", "keepAlive", true)
         switchRow(c, "Wake lock", null, "wakeLock", true)
         switchRow(c, "Wi-Fi lock", null, "wifiLock", true)
@@ -230,8 +296,10 @@ class SettingsActivity : Activity() {
             startActivity(Intent(this, MainActivity::class.java).putExtra("checklist", true).putExtra("noRedirect", true))
         }
         note(c, "Some phone makers also need autostart / unrestricted battery set by hand in system settings.")
+    }
 
-        c = section("Text-to-speech")
+    private fun buildTts() {
+        val c = section("Text-to-speech")
         ttsStatus = label("…", 13f, C.MUTED)
         row(c, null, "Engine and voice data", null, trailing = ttsStatus) { refreshTts() }
         buttonRow(c, "Check voice data", "Asks the TTS engine") {
@@ -252,8 +320,10 @@ class SettingsActivity : Activity() {
             try { startActivity(Intent("com.android.settings.TTS_SETTINGS")) } catch (_: Exception) { toast("Not available") }
         }
         switchRow(c, "Native TTS bridge", "Experimental. Replaces the page's speechSynthesis with Android TextToSpeech. Reloads open tabs.", "nativeTts", false)
+    }
 
-        c = section("Tor")
+    private fun buildTor() {
+        val c = section("Tor")
         switchRow(c, "Allow session cookies in Tor tabs", "Off = no cookies at all. On = logins work until you close the tab.", "torCookies", false)
         val n = Prefs.list("torHosts").size
         buttonRow(c, "Always-Tor sites", if (n == 0) "None" else "$n saved. Tap to clear") {
@@ -263,10 +333,53 @@ class SettingsActivity : Activity() {
             if (Build.VERSION.SDK_INT >= 28) startActivity(Intent(this, TorActivity::class.java)) else toast("Needs Android 9+")
         }
         note(c, "Tor tabs hide your IP and your ISP's view of the sites you visit. Nothing loads until Tor is verified, and WebRTC is off. This is still weaker than Tor Browser against fingerprinting, and logging in to accounts can identify you.")
+    }
 
-        c = section("About")
-        val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
-        row(c, null, "BG Browser", "Version $ver · $packageName")
-        note(c, "Swiping the app out of recents kills the page. Auto-next is a text guess, so use the custom selector if a site needs it. Swipe mode only works with the screen on; scroll mode works with it off. Audio over Tor can stutter.")
+    @Suppress("DEPRECATION")
+    private fun versionInfo(): String = try {
+        val p = packageManager.getPackageInfo(packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= 28) p.longVersionCode else p.versionCode.toLong()
+        "${p.versionName} ($code)"
+    } catch (_: Exception) { "?" }
+
+    private fun buildAbout() {
+        val ver = versionInfo()
+        var c = section("BG Browser")
+        row(c, null, "Version", ver)
+        row(c, null, "Package", packageName)
+        note(c, "A browser that keeps a page running in the background, mainly sites that read text aloud and auto-scroll or auto-next. The page never registers a media session, so the app does it for the page.")
+
+        c = section("How to use")
+        note(c, "1. Open your reading site and start its voice.\n2. Turn on Auto mode from the menu (scroll works with the screen off).\n3. Lock the screen. Use the notification to pause or resume.\n4. Allow notifications and unrestricted battery so Android does not freeze the page.")
+
+        c = section("Help")
+        buttonRow(c, "Welcome tour", "Show the first-launch screens again") {
+            startActivity(Intent(this, WelcomeActivity::class.java))
+        }
+        buttonRow(c, "Setup checklist", "Notifications, battery, boot") {
+            startActivity(Intent(this, MainActivity::class.java).putExtra("checklist", true).putExtra("noRedirect", true))
+        }
+        buttonRow(c, "Project on GitHub", "krishna000627-pixel/bgbrowser") {
+            try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/krishna000627-pixel/bgbrowser"))) }
+            catch (_: Exception) { toast("No browser found") }
+        }
+        buttonRow(c, "Copy version info", null) {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("BG Browser",
+                "BG Browser $ver, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}"))
+            toast("Copied")
+        }
+        buttonRow(c, "Reset all settings", "Also clears saved tabs and per-site memory", C.RED) {
+            dlg().setTitle("Reset all settings?")
+                .setMessage("Every setting returns to its default. Cookies and history are not touched.")
+                .setPositiveButton("Reset") { _, _ -> Prefs.removePrefix(""); toast("Settings reset"); recreate() }
+                .setNegativeButton("Cancel", null).show()
+        }
+
+        c = section("Good to know")
+        note(c, "Swiping the app out of recents kills the page. Auto-next is a text guess, so use the custom selector if a site needs it. Swipe mode only works with the screen on. Audio over Tor can stutter. Some phone makers need manual battery and autostart settings.")
+
+        c = section("Credits")
+        note(c, "Tor support uses the Guardian Project tor-android library (BSD 3-clause).")
     }
 }

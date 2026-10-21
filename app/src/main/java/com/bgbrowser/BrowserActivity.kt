@@ -94,6 +94,7 @@ abstract class BrowserActivity : Activity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var chips: LinearLayout
     private lateinit var pill: LinearLayout
+    private var chipBar: View? = null
     private lateinit var ppBtn: ImageView
     private lateinit var autoBtn: ImageView
     private lateinit var speedBtn: TextView
@@ -112,7 +113,9 @@ abstract class BrowserActivity : Activity() {
             }
         }
     }
-    private val fade = Runnable { pill.animate().alpha(0.25f).setDuration(400).start() }
+    private val fade = Runnable {
+        if (Prefs.bool("pillFade", true)) pill.animate().alpha(0.25f).setDuration(400).start()
+    }
 
     // ───────────────────────── lifecycle ─────────────────────────
 
@@ -155,8 +158,10 @@ abstract class BrowserActivity : Activity() {
         openInitialTabs()
         if (kind == K_NORMAL) {
             TtsHelper.check(this) { st -> ttsState = st; updateChips() }
-            if (!Prefs.bool("firstRunDone", false) || intent.getBooleanExtra("checklist", false)) {
+            if (intent.getBooleanExtra("checklist", false)) {
                 ui.postDelayed({ showChecklist() }, 600)
+            } else if (!Prefs.bool("firstRunDone", false)) {
+                startActivity(Intent(this, WelcomeActivity::class.java))
             } else if (!notifOk()) {
                 requestNotif()
             }
@@ -184,6 +189,7 @@ abstract class BrowserActivity : Activity() {
     override fun onResume() {
         super.onResume()
         keepRunning()
+        applyUiPrefs()
         val sig = settingsSig()
         if (sig != lastSig) {
             lastSig = sig
@@ -251,6 +257,7 @@ abstract class BrowserActivity : Activity() {
             addView(chips, FrameLayout.LayoutParams(WRAP, MATCH))
         }
         column.addView(chipScroll, LinearLayout.LayoutParams(MATCH, dp(36)))
+        chipBar = chipScroll
 
         webHost = FrameLayout(this)
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -387,6 +394,18 @@ abstract class BrowserActivity : Activity() {
         updateChips()
         updateLock()
         updateTabsCount()
+        applyUiPrefs()
+    }
+
+    private fun applyUiPrefs() {
+        if (::pill.isInitialized) {
+            val on = Prefs.bool("showPill", false)
+            pill.visibility = if (on) View.VISIBLE else View.GONE
+            if (on) wake()
+        }
+        chipBar?.visibility = if (Prefs.bool("showChips", true)) View.VISIBLE else View.GONE
+        if (Prefs.bool("keepScreenOn", false)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     private fun hideKeyboard() {
@@ -484,6 +503,16 @@ abstract class BrowserActivity : Activity() {
 
     private fun showMenu() = showSheet("") { body ->
         val t = tab
+        if (!Prefs.bool("showPill", false)) {
+            row(body, if (paused) R.drawable.ic_play else R.drawable.ic_pause, if (paused) "Resume" else "Pause", "Page media") {
+                dismissSheet(); togglePlay()
+            }
+            row(body, R.drawable.ic_auto, "Auto mode", listOf("Off", "Scroll", "Swipe")[mode.coerceIn(0, 2)]) {
+                cycleMode(); sheetRefresh?.invoke()
+            }
+            row(body, R.drawable.ic_ff, "Auto speed", "×$speed") { cycleSpeed(); sheetRefresh?.invoke() }
+            row(body, R.drawable.ic_next, "Next page", "Click the next button now") { dismissSheet(); nextNow() }
+        }
         row(body, R.drawable.ic_add, "New tab") { dismissSheet(); newTab() }
         if (kind == K_NORMAL) {
             row(body, R.drawable.ic_incognito, "New incognito tab") { dismissSheet(); openIncognito(null) }
@@ -509,6 +538,8 @@ abstract class BrowserActivity : Activity() {
             }
         }
         if (kind == K_NORMAL) row(body, R.drawable.ic_history, "History") { showHistory() }
+        row(body, R.drawable.ic_check, "Copy link") { dismissSheet(); copyLink() }
+        row(body, R.drawable.ic_forward, "Share link") { dismissSheet(); shareLink() }
         row(body, R.drawable.ic_settings, "Settings") { dismissSheet(); startActivity(Intent(this, SettingsActivity::class.java)) }
         row(body, R.drawable.ic_trash, "Clear data", if (kind == K_NORMAL) "Cookies, cache, site data, history" else "Wipe this private session") {
             dismissSheet()
@@ -592,7 +623,7 @@ abstract class BrowserActivity : Activity() {
     private fun openInitialTabs() {
         val extra = intent.getStringExtra("url")
         if (kind == K_NORMAL) {
-            val saved = Prefs.str("tabs", "").split("\n").filter { it.isNotBlank() }
+            val saved = if (Prefs.bool("restoreTabs", true)) Prefs.str("tabs", "").split("\n").filter { it.isNotBlank() } else emptyList()
             for (u in saved) {
                 val t = addTab(null, false)
                 t.lazyUrl = u
@@ -950,6 +981,23 @@ abstract class BrowserActivity : Activity() {
 
     private fun cycleMode() { mode = (mode + 1) % 3; saveSite(); applyAuto() }
     private fun cycleSpeed() { speed = speed % 3 + 1; saveSite(); applyAuto() }
+
+    private fun currentUrl(): String? = tab?.url?.takeIf { it.startsWith("http") }
+
+    private fun copyLink() {
+        val u = currentUrl()
+        if (u == null) { Toast.makeText(this, "No page to copy", Toast.LENGTH_SHORT).show(); return }
+        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("link", u))
+        Toast.makeText(this, "Link copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareLink() {
+        val u = currentUrl() ?: return
+        try {
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, u), null))
+        } catch (_: Exception) {}
+    }
 
     private fun togglePlay() {
         val s = Bridge.service

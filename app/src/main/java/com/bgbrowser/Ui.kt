@@ -112,3 +112,17 @@ fun Context.chip(text: String, dot: Int, onClick: (() -> Unit)? = null): LinearL
     if (onClick != null) c.setOnClickListener { onClick() }
     return c
 }
+
+fun Context.prefSwitch(card: LinearLayout, title: String, sub: String?, key: String, def: Boolean, after: ((Boolean) -> Unit)? = null) {
+    val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+    val sw = android.widget.Switch(this).apply {
+        isChecked = Prefs.bool(key, def)
+        thumbTintList = ColorStateList(states, intArrayOf(C.GOLD, C.MUTED))
+        trackTintList = ColorStateList(states, intArrayOf(0x66F5B83D, 0x44FFFFFF))
+    }
+    sw.setOnCheckedChangeListener { _, c ->
+        Prefs.put(key, if (c) "1" else "0")
+        after?.invoke(c)
+    }
+    row(card, null, title, sub, trailing = sw) { sw.toggle() }
+}
