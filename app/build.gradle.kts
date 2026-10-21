@@ -27,8 +27,8 @@ android {
         applicationId = "com.bgbrowser"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "3.0"
+        versionCode = 4
+        versionName = "4.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
     signingConfigs {
@@ -63,6 +63,6 @@ dependencies {
     implementation("androidx.media:media:1.7.0")
     implementation("androidx.webkit:webkit:1.11.0")
     // Tor (Guardian Project), pinned. Driven by reflection in TorManager.kt.
-    implementation("info.guardianproject:tor-android:0.4.8.12")
+    implementation("info.guardianproject:tor-android:0.4.8.17.2")
     implementation("info.guardianproject:jtorctl:0.4.5.7")
 }
