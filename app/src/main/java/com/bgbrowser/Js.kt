@@ -133,4 +133,102 @@ object Js {
   }catch(e){}
 })();
 """
+
+    // Tor tabs: make every Tor user look alike and close side channels. LVL 0 standard, 1 safer, 2 safest (no JS at all).
+    fun torHarden(level: Int): String = "(function(LVL){" + TOR_HARDEN + "})(" + level + ");"
+
+    private val TOR_HARDEN = """
+  var dp=function(o,n,v){try{Object.defineProperty(o,n,{get:function(){return v;},configurable:true});}catch(e){}};
+  var kill=function(n){try{Object.defineProperty(window,n,{value:undefined,configurable:true,writable:true});}catch(e){}};
+  var N=navigator;
+  try{
+    dp(N,'hardwareConcurrency',2); dp(N,'languages',['en-US','en']); dp(N,'language','en-US');
+    dp(N,'platform','Linux armv81'); dp(N,'userAgentData',undefined); dp(N,'webdriver',false);
+    ['deviceMemory','getBattery','connection','mozConnection','webkitConnection','getGamepads','bluetooth','usb','serial','hid','xr','gpu','wakeLock'].forEach(function(n){dp(N,n,undefined);});
+  }catch(e){}
+  ['DeviceMotionEvent','DeviceOrientationEvent','AmbientLightSensor','Accelerometer','Gyroscope','Magnetometer','Sensor','AbsoluteOrientationSensor','RelativeOrientationSensor','LinearAccelerationSensor','GravitySensor','BatteryManager','NetworkInformation'].forEach(kill);
+  try{ if(navigator.storage){ navigator.storage.estimate=function(){return Promise.resolve({quota:2147483648,usage:0});}; } }catch(e){}
+
+  // Screen and window size: rounded, so the exact device is not revealed.
+  try{
+    var rd=function(v){v=v||0;return Math.max(200,Math.round(v/100)*100);};
+    var S=window.screen;
+    var gw=function(){return rd(window.innerWidth);}, gh=function(){return rd(window.innerHeight);};
+    [['width',gw],['availWidth',gw],['height',gh],['availHeight',gh]].forEach(function(p){try{Object.defineProperty(S,p[0],{get:p[1],configurable:true});}catch(e){}});
+    dp(S,'availLeft',0); dp(S,'availTop',0); dp(S,'colorDepth',24); dp(S,'pixelDepth',24);
+    Object.defineProperty(window,'outerWidth',{get:function(){return window.innerWidth;},configurable:true});
+    Object.defineProperty(window,'outerHeight',{get:function(){return window.innerHeight;},configurable:true});
+    if(LVL>=1) Object.defineProperty(window,'devicePixelRatio',{get:function(){return 2;},configurable:true});
+  }catch(e){}
+
+  // Time zone and locale: always UTC and en-US.
+  try{
+    var D=Date.prototype;
+    D.getTimezoneOffset=function(){return 0;};
+    [['getFullYear','getUTCFullYear'],['getMonth','getUTCMonth'],['getDate','getUTCDate'],['getDay','getUTCDay'],['getHours','getUTCHours'],['getMinutes','getUTCMinutes'],['getSeconds','getUTCSeconds'],['getMilliseconds','getUTCMilliseconds'],['setFullYear','setUTCFullYear'],['setMonth','setUTCMonth'],['setDate','setUTCDate'],['setHours','setUTCHours'],['setMinutes','setUTCMinutes'],['setSeconds','setUTCSeconds'],['setMilliseconds','setUTCMilliseconds']].forEach(function(p){D[p[0]]=D[p[1]];});
+    var dn=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'], mn=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var p2=function(n){return (n<10?'0':'')+n;};
+    var dpart=function(u){return dn[u.getUTCDay()]+' '+mn[u.getUTCMonth()]+' '+p2(u.getUTCDate())+' '+u.getUTCFullYear();};
+    var tpart=function(u){return p2(u.getUTCHours())+':'+p2(u.getUTCMinutes())+':'+p2(u.getUTCSeconds())+' GMT+0000 (Coordinated Universal Time)';};
+    var fmt=function(f){return function(){var t=this.getTime();if(t!==t)return 'Invalid Date';return f(new Date(t));};};
+    D.toString=fmt(function(u){return dpart(u)+' '+tpart(u);});
+    D.toDateString=fmt(dpart);
+    D.toTimeString=fmt(tpart);
+    ['toLocaleString','toLocaleDateString','toLocaleTimeString'].forEach(function(n){
+      var o=D[n];
+      D[n]=function(l,opt){opt=Object.assign({},opt||{});if(!opt.timeZone)opt.timeZone='UTC';return o.call(this,l||'en-US',opt);};
+    });
+    var IDF=Intl.DateTimeFormat;
+    var W=function(l,o){o=Object.assign({},o||{});if(!o.timeZone)o.timeZone='UTC';return new IDF(l||'en-US',o);};
+    W.prototype=IDF.prototype; W.supportedLocalesOf=IDF.supportedLocalesOf;
+    Intl.DateTimeFormat=W;
+  }catch(e){}
+
+  // Canvas readback gets tiny per-session noise, so canvas fingerprints differ every session.
+  try{
+    var seed=(Math.random()*4294967296)>>>0;
+    var rnd=function(){seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
+    var CP=CanvasRenderingContext2D.prototype, HP=HTMLCanvasElement.prototype;
+    var oGID=CP.getImageData, oTDU=HP.toDataURL, oTB=HP.toBlob;
+    var jitter=function(d){for(var i=0;i<d.length;i+=4){if(rnd()<0.08){var k=(rnd()*3)|0;d[i+k]=d[i+k]^1;}}};
+    var copy=function(c){
+      try{
+        var w=c.width,h=c.height;
+        if(!w||!h||w*h>4000000)return c;
+        var t=document.createElement('canvas');t.width=w;t.height=h;
+        var x=t.getContext('2d');x.drawImage(c,0,0);
+        var id=oGID.call(x,0,0,w,h);jitter(id.data);x.putImageData(id,0,0);
+        return t;
+      }catch(e){return c;}
+    };
+    CP.getImageData=function(){var r=oGID.apply(this,arguments);try{jitter(r.data);}catch(e){}return r;};
+    HP.toDataURL=function(){return oTDU.apply(copy(this),arguments);};
+    HP.toBlob=function(){return oTB.apply(copy(this),arguments);};
+  }catch(e){}
+
+  // WebGL: hide the GPU name. Safer and Safest remove WebGL, WebAssembly and friends.
+  try{
+    var patchGL=function(P){
+      if(!P)return;
+      var gp=P.getParameter, ge=P.getExtension;
+      P.getParameter=function(p){if(p===37445)return 'Google Inc.';if(p===37446)return 'ANGLE (Generic Renderer)';return gp.apply(this,arguments);};
+      P.getExtension=function(n){if(n==='WEBGL_debug_renderer_info')return null;return ge.apply(this,arguments);};
+    };
+    patchGL(window.WebGLRenderingContext&&WebGLRenderingContext.prototype);
+    patchGL(window.WebGL2RenderingContext&&WebGL2RenderingContext.prototype);
+  }catch(e){}
+  if(LVL>=1){
+    try{
+      var gc=HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext=function(t){if(/webgl|experimental/i.test(String(t)))return null;return gc.apply(this,arguments);};
+    }catch(e){}
+    ['WebGLRenderingContext','WebGL2RenderingContext','OffscreenCanvas','WebAssembly','SharedArrayBuffer'].forEach(kill);
+  }
+
+  // Coarser timers make timing attacks harder.
+  try{
+    var q=LVL>=1?100:10, pn=performance.now.bind(performance);
+    performance.now=function(){return Math.floor(pn()/q)*q;};
+  }catch(e){}
+"""
 }

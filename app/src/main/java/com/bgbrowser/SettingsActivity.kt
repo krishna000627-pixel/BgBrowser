@@ -28,10 +28,13 @@ class SettingsActivity : Activity() {
     private lateinit var col: LinearLayout
     private var testTts: TextToSpeech? = null
     private var page = "home"
+    private var shownSig = ""
     private lateinit var ttsStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyTheme()
+        shownSig = themeSig()
         page = intent.getStringExtra("page") ?: "home"
         val sv = ScrollView(this).apply { setBackgroundColor(C.BG) }
         col = LinearLayout(this).apply {
@@ -50,6 +53,7 @@ class SettingsActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (themeSig() != shownSig) { recreate(); return }
         refreshTts()
     }
 
@@ -88,7 +92,7 @@ class SettingsActivity : Activity() {
         }
     }
 
-    private fun dlg() = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+    private fun dlg() = AlertDialog.Builder(this, dialogTheme())
 
     // ───────── helpers ─────────
 
@@ -111,7 +115,7 @@ class SettingsActivity : Activity() {
         val sw = Switch(this).apply {
             isChecked = Prefs.bool(key, def)
             thumbTintList = ColorStateList(states, intArrayOf(C.GOLD, C.MUTED))
-            trackTintList = ColorStateList(states, intArrayOf(0x66F5B83D, 0x44FFFFFF))
+            trackTintList = ColorStateList(states, intArrayOf((C.GOLD and 0x00FFFFFF) or 0x66000000, if (C.LIGHT) 0x33000000 else 0x44FFFFFF))
         }
         sw.setOnCheckedChangeListener { _, c ->
             Prefs.put(key, if (c) "1" else "0")
@@ -120,7 +124,7 @@ class SettingsActivity : Activity() {
         row(card, null, title, sub, trailing = sw) { sw.toggle() }
     }
 
-    private fun choiceRow(card: LinearLayout, title: String, key: String, labels: List<String>, values: List<String>, def: String) {
+    private fun choiceRow(card: LinearLayout, title: String, key: String, labels: List<String>, values: List<String>, def: String, after: (() -> Unit)? = null) {
         val valueView = label("", 13f, C.GOLD)
         fun refresh() {
             val i = values.indexOf(Prefs.str(key, def))
@@ -129,12 +133,12 @@ class SettingsActivity : Activity() {
         refresh()
         row(card, null, title, null, trailing = valueView) {
             dlg().setTitle(title)
-                .setItems(labels.toTypedArray<CharSequence>()) { _, i -> Prefs.put(key, values[i]); refresh() }
+                .setItems(labels.toTypedArray<CharSequence>()) { _, i -> Prefs.put(key, values[i]); refresh(); after?.invoke() }
                 .show()
         }
     }
 
-    private fun textRow(card: LinearLayout, title: String, key: String, placeholder: String, def: String) {
+    private fun textRow(card: LinearLayout, title: String, key: String, placeholder: String, def: String, after: (() -> Unit)? = null) {
         val v = label("", 13f, C.MUTED).apply {
             maxWidth = dp(170)
             maxLines = 1
@@ -155,7 +159,7 @@ class SettingsActivity : Activity() {
                 setPadding(dp(20), dp(12), dp(20), dp(12))
             }
             dlg().setTitle(title).setView(et)
-                .setPositiveButton("Save") { _, _ -> Prefs.put(key, et.text.toString().trim()); refresh() }
+                .setPositiveButton("Save") { _, _ -> Prefs.put(key, et.text.toString().trim()); refresh(); after?.invoke() }
                 .setNegativeButton("Cancel", null).show()
         }
     }
@@ -169,6 +173,7 @@ class SettingsActivity : Activity() {
     }
 
     private fun pageTitle() = when (page) {
+        "appearance" -> "Appearance"
         "browsing" -> "Browsing"
         "controls" -> "Controls & display"
         "privacy" -> "Privacy & cookies"
@@ -199,6 +204,7 @@ class SettingsActivity : Activity() {
 
     private fun build() {
         when (page) {
+            "appearance" -> buildAppearance()
             "browsing" -> buildBrowsing()
             "controls" -> buildControls()
             "privacy" -> buildPrivacy()
@@ -216,14 +222,51 @@ class SettingsActivity : Activity() {
         fun item(icon: Int, title: String, sub: String, p: String) {
             row(c, icon, title, sub, trailing = label("›", 22f, C.MUTED)) { open(p) }
         }
+        item(R.drawable.ic_settings, "Appearance", "Theme, accent color, layout, menu, status chips", "appearance")
         item(R.drawable.ic_desktop, "Browsing", "Search engine, home page, desktop site, text size", "browsing")
         item(R.drawable.ic_play, "Controls & display", "Floating pill, status chips, screen, tabs", "controls")
         item(R.drawable.ic_lock, "Privacy & cookies", "Cookies, history, incognito, cache", "privacy")
         item(R.drawable.ic_auto, "Auto mode", "Scroll, swipe, speed, auto-next", "auto")
         item(R.drawable.ic_pause, "Background", "Keep-alive, battery, boot", "background")
         item(R.drawable.ic_wave, "Text-to-speech", "Voice data, test, native bridge", "tts")
-        item(R.drawable.ic_tor, "Tor", "Cookies, always-Tor sites", "tor")
+        item(R.drawable.ic_tor, "Tor", "Security level, cookies, always-Tor sites", "tor")
         item(R.drawable.ic_settings, "About", "Version, help, reset", "about")
+    }
+
+    private fun buildAppearance() {
+        var c = section("Theme")
+        choiceRow(c, "Theme", "theme", listOf("Dark", "AMOLED black", "Light"), listOf("dark", "amoled", "light"), "dark") { recreate() }
+        choiceRow(c, "Accent color", "accent",
+            listOf("Gold", "Blue", "Green", "Purple", "Red", "Teal", "Pink", "Orange"),
+            listOf("F5B83D", "5AA9FF", "4ADE80", "B388FF", "FF6B6B", "2DD4BF", "F472B6", "FB923C"), "F5B83D") { recreate() }
+        textRow(c, "Custom accent", "accentCustom", "#RRGGBB (empty = preset above)", "") { recreate() }
+        note(c, "Private tabs pick up theme changes the next time you open them.")
+
+        c = section("Layout")
+        switchRow(c, "Address bar at top", "Off keeps it at the bottom for one-hand use", "barTop", false)
+        switchRow(c, "Compact bars", "Thinner address bar and status strip", "compact", false)
+
+        c = section("Menu")
+        buttonRow(c, "Menu items", "Choose which shortcuts show in the menu") { pickMenuItems() }
+
+        c = section("Status chips")
+        switchRow(c, "Show status chips", "The small strip above the page", "showChips", true)
+        switchRow(c, "Show all chips", "Off = only warnings, Tor status and Auto when it is on", "chipsAll", false)
+    }
+
+    private fun pickMenuItems() {
+        val hidden = Prefs.list("menuHidden")
+        val ids = MENU_TILES.map { it.first }
+        val names = MENU_TILES.map { it.second }
+        val checked = BooleanArray(ids.size) { !hidden.contains(ids[it]) }
+        dlg().setTitle("Menu items")
+            .setMultiChoiceItems(names.toTypedArray<CharSequence>(), checked) { _, i, b -> checked[i] = b }
+            .setPositiveButton("Save") { _, _ ->
+                val off = HashSet<String>()
+                for (i in ids.indices) if (!checked[i]) off.add(ids[i])
+                Prefs.putList("menuHidden", off)
+            }
+            .setNegativeButton("Cancel", null).show()
     }
 
     private fun buildBrowsing() {
@@ -246,7 +289,6 @@ class SettingsActivity : Activity() {
         note(c, "With the pill off, the same controls are at the top of the menu.")
 
         c = section("Display")
-        switchRow(c, "Show status chips", "Background, Tor, auto and voice status above the page", "showChips", true)
         switchRow(c, "Keep screen on", "Stops the screen from turning off while the browser is open", "keepScreenOn", false)
 
         c = section("Tabs")
@@ -323,7 +365,13 @@ class SettingsActivity : Activity() {
     }
 
     private fun buildTor() {
-        val c = section("Tor")
+        var c = section("Protection")
+        choiceRow(c, "Security level", "torLevel", listOf("Standard", "Safer", "Safest"), listOf("0", "1", "2"), "0")
+        note(c, "Standard: fingerprint hardening only. Safer: also removes WebGL and WebAssembly, blocks autoplay and rounds timers more. Safest: JavaScript and site storage off. Most sites look plain, but it removes the biggest attack surface. Open Tor tabs pick the change up when you return to them.")
+        switchRow(c, "Separate circuit per site", "Sites you visit cannot be linked at the exit relay. A bit slower. Applies the next time Tor starts.", "torIsolate", true)
+        note(c, "Always on in Tor tabs: same user agent for everyone, UTC time zone, rounded screen size, canvas noise, WebRTC off, no location, no localhost or LAN access, HTTPS only, nothing loads until Tor is verified. Use “New Tor identity” in a Tor tab's menu to wipe everything.")
+
+        c = section("Tor")
         switchRow(c, "Allow session cookies in Tor tabs", "Off = no cookies at all. On = logins work until you close the tab.", "torCookies", false)
         val n = Prefs.list("torHosts").size
         buttonRow(c, "Always-Tor sites", if (n == 0) "None" else "$n saved. Tap to clear") {
@@ -332,7 +380,7 @@ class SettingsActivity : Activity() {
         buttonRow(c, "Open a Tor tab", "Starts Tor and verifies it with check.torproject.org") {
             if (Build.VERSION.SDK_INT >= 28) startActivity(Intent(this, TorActivity::class.java)) else toast("Needs Android 9+")
         }
-        note(c, "Tor tabs hide your IP and your ISP's view of the sites you visit. Nothing loads until Tor is verified, and WebRTC is off. This is still weaker than Tor Browser against fingerprinting, and logging in to accounts can identify you.")
+        note(c, "Tor tabs hide your IP and your ISP's view of the sites you visit. This is still weaker than Tor Browser. Android WebView cannot isolate cookies and caches per site, hide your system language or fonts, or trim referrers, and it has no .onion support. For serious anonymity use Tor Browser. Logging in to accounts can identify you.")
     }
 
     @Suppress("DEPRECATION")

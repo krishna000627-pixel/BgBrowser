@@ -27,8 +27,8 @@ android {
         applicationId = "com.bgbrowser"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "6.0"
+        versionCode = 8
+        versionName = "8.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
     signingConfigs {

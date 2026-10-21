@@ -5,7 +5,7 @@ Paste this file and the latest `BgBrowser_vN.zip` at the start of the next chat.
 ## What the app is
 Android browser (Kotlin, WebView, no Compose) that keeps a web page running in the background, mainly sites that read text aloud (web TTS) and auto-scroll/auto-next. The page never registers a media session, so the app does it for the page.
 
-## Current state (v6)
+## Current state (v8)
 - Package `com.bgbrowser`, minSdk 26, target/compile 34, AGP 8.5.2, Kotlin 1.9.24, Gradle 8.10.2 in CI. Tor: `info.guardianproject:tor-android:0.4.8.17.2` + `jtorctl:0.4.5.7` (driven by reflection in `TorManager.kt`, so only dependency resolution can break the build; 0.4.8.12 does not exist on Maven Central or Google, so v4 moved to 0.4.8.17.2; if resolution fails again check central.sonatype.com for a listed version).
 - Three processes, one `BrowserActivity` base: `MainActivity` (normal), `IncognitoActivity` (`:incognito`), `TorActivity` (`:tor`). Each has its own WebView data dir suffix (wiped in `App.onCreate`), its own `KeepAliveService` subclass and its own `Bridge`. Incognito/Tor need Android 9+.
 - `Prefs.kt`: file-backed settings readable from all processes. `History.kt`: simple history (normal mode only).
@@ -15,6 +15,8 @@ Android browser (Kotlin, WebView, no Compose) that keeps a web page running in t
 - Floating pill is optional (`showPill`, default off). With it off, Pause/Resume, Auto mode, Auto speed and Next page are at the top of the menu. Other new prefs: `pillFade`, `showChips`, `keepScreenOn`, `restoreTabs`. Menu also has Copy link and Share link.
 - Stale-file trap: `cp -r` never deletes. v3 moved `MainActivity` into `Modes.kt`, so an old `MainActivity.kt` caused a redeclaration error until removed by hand.
 - TTS: `<queries>` for TTS, startup engine/voice-data check with install chip, speech state mirrored to the MediaSession, optional "Native TTS bridge" (off by default, experimental).
+- UI (v8): `C` in `Ui.kt` is now mutable and `C.apply()` reads `theme` (dark/amoled/light) and `accent`/`accentCustom`; every activity calls `applyTheme()` first. `themeSig()` changes make the normal browser (not private tabs) and Settings pages `recreate()` on resume. Settings has an Appearance page: theme, accent, address bar top/bottom (`barTop`), compact bars (`compact`), menu items (`menuHidden` list, ids in `MENU_TILES`), status chips (`showChips`, `chipsAll`). The menu is a tile grid (playback tiles when the pill is off, quick actions, then Settings, Clear data, Exit). Chips are "smart" by default: only warnings, Tor status, Auto when on.
+- Tor hardening (v7): security level `torLevel` (0 standard, 1 safer = no WebGL/WASM/autoplay, 2 safest = JS and DOM storage off), `Js.torHarden(level)` (navigator/screen/timezone/locale normalised, canvas noise, WebGL masked, coarse timers, sensors removed), one generic UA for all Tor tabs (`torUa()`), loopback/LAN/private hosts blocked in `shouldInterceptRequest` plus `removeImplicitRules` (reflection) on the proxy, `HTTPTunnelPort auto IsolateDestAddr` (pref `torIsolate`, falls back to plain `auto`), menu row "New Tor identity" (wipe, close tabs, NEWNYM via reflection). Not possible in WebView: per-site cookie/cache isolation, Accept-Language/referrer control, fonts, .onion.
 - Tor: dead-port proxy until bootstrapped and verified via check.torproject.org, WebRTC removed by injected script, HTTPS-only, request blocking while Tor is down, heartbeat re-blocks if circuits drop.
 - v2 bug fixed: the "next" button regex had `\\b` in a raw string, so text-based next never matched.
 

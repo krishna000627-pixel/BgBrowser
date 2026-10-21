@@ -81,6 +81,7 @@ abstract class BrowserActivity : Activity() {
     private var pendingUrl: String? = null
     private var ttsState = TtsState.UNKNOWN
     private var lastSig = ""
+    private var lastUiSig = ""
     private var verifier: WebView? = null
     private var verifying = false
     private val stateBridge = StateBridge()
@@ -121,6 +122,8 @@ abstract class BrowserActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyTheme()
+        lastUiSig = themeSig()
         if (kind != K_NORMAL && Build.VERSION.SDK_INT < 28) {
             Toast.makeText(this, "Incognito and Tor need Android 9 or newer", Toast.LENGTH_LONG).show()
             finish()
@@ -188,6 +191,11 @@ abstract class BrowserActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (kind == K_NORMAL && themeSig() != lastUiSig) {
+            Prefs.put("sessionOpen", "0")
+            recreate()
+            return
+        }
         keepRunning()
         applyUiPrefs()
         val sig = settingsSig()
@@ -246,6 +254,8 @@ abstract class BrowserActivity : Activity() {
     private fun buildUi() {
         rootFrame = FrameLayout(this).apply { setBackgroundColor(C.BG) }
         val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val compact = Prefs.bool("compact", false)
+        val barTop = Prefs.bool("barTop", false)
 
         chips = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -256,7 +266,7 @@ abstract class BrowserActivity : Activity() {
             isHorizontalScrollBarEnabled = false
             addView(chips, FrameLayout.LayoutParams(WRAP, MATCH))
         }
-        column.addView(chipScroll, LinearLayout.LayoutParams(MATCH, dp(36)))
+        column.addView(chipScroll, LinearLayout.LayoutParams(MATCH, dp(if (compact) 28 else 36)))
         chipBar = chipScroll
 
         webHost = FrameLayout(this)
@@ -301,7 +311,7 @@ abstract class BrowserActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(C.BAR)
-            setPadding(dp(6), dp(6), dp(6), dp(6))
+            setPadding(dp(6), dp(if (compact) 3 else 6), dp(6), dp(if (compact) 3 else 6))
         }
         bottom.addView(iconBtn(R.drawable.ic_back) { goBack() })
 
@@ -339,7 +349,7 @@ abstract class BrowserActivity : Activity() {
             addView(lockIcon)
             addView(urlBox)
         }
-        bottom.addView(addressPill, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
+        bottom.addView(addressPill, LinearLayout.LayoutParams(0, dp(if (compact) 38 else 44), 1f).apply { leftMargin = dp(4); rightMargin = dp(4) })
 
         reloadBtn = iconBtn(R.drawable.ic_reload) {
             val t = tab
@@ -361,7 +371,7 @@ abstract class BrowserActivity : Activity() {
         }
         bottom.addView(tabsWrap, LinearLayout.LayoutParams(dp(40), dp(40)))
         bottom.addView(iconBtn(R.drawable.ic_menu) { showMenu() })
-        column.addView(bottom, LinearLayout.LayoutParams(MATCH, WRAP))
+        column.addView(bottom, if (barTop) 0 else column.childCount, LinearLayout.LayoutParams(MATCH, WRAP))
 
         // floating control pill
         ppBtn = iconBtn(R.drawable.ic_pause, 44, C.GOLD) { wake(); togglePlay() }
@@ -375,7 +385,7 @@ abstract class BrowserActivity : Activity() {
         pill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = rounded(Color.parseColor("#F01F2C47"), 28)
+            background = rounded((C.SURFACE2 and 0x00FFFFFF) or (0xF0 shl 24), 28)
             setPadding(dp(6), dp(4), dp(6), dp(4))
             elevation = dpf(8)
             addView(ppBtn)
@@ -387,7 +397,7 @@ abstract class BrowserActivity : Activity() {
         rootFrame.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
         rootFrame.addView(
             pill,
-            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(76) }
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(if (barTop) 24 else if (compact) 64 else 76) }
         )
         setContentView(rootFrame)
         updatePill()
@@ -403,7 +413,7 @@ abstract class BrowserActivity : Activity() {
             pill.visibility = if (on) View.VISIBLE else View.GONE
             if (on) wake()
         }
-        chipBar?.visibility = if (Prefs.bool("showChips", true)) View.VISIBLE else View.GONE
+        updateChips()
         if (Prefs.bool("keepScreenOn", false)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
@@ -440,11 +450,15 @@ abstract class BrowserActivity : Activity() {
     private fun updateChips() {
         if (!::chips.isInitialized) return
         chips.removeAllViews()
+        val all = Prefs.bool("chipsAll", false)
         fun add(v: View) {
             chips.addView(v, LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(8) })
         }
-        if (Bridge.service != null) add(chip("Running in background", C.GREEN))
-        else add(chip("Not in background · tap to start", C.AMBER) { startKeepAlive(); ui.postDelayed({ updateChips() }, 800) })
+        if (Bridge.service != null) {
+            if (all) add(chip("Running in background", C.GREEN))
+        } else if (Prefs.bool("keepAlive", true)) {
+            add(chip("Not in background · tap to start", C.AMBER) { startKeepAlive(); ui.postDelayed({ updateChips() }, 800) })
+        }
 
         when (kind) {
             K_TOR -> when {
@@ -453,14 +467,17 @@ abstract class BrowserActivity : Activity() {
                 else -> add(chip("Tor connecting ${TorManager.progress}%", C.AMBER))
             }
             K_INCOG -> add(chip("Incognito", C.PURPLE))
-            else -> add(chip("Tor off", C.MUTED) { openTor(null) })
+            else -> if (all) add(chip("Tor off", C.MUTED) { openTor(null) })
         }
-        add(chip(if (mode == 0) "Auto off" else "Auto ${if (mode == 1) "scroll" else "swipe"} ×$speed", if (mode == 0) C.MUTED else C.GOLD))
+        if (mode != 0 || all) {
+            add(chip(if (mode == 0) "Auto off" else "Auto ${if (mode == 1) "scroll" else "swipe"} ×$speed", if (mode == 0) C.MUTED else C.GOLD))
+        }
         when (ttsState) {
             TtsState.NO_ENGINE -> add(chip("No TTS engine · tap to install", C.RED) { TtsHelper.install(this) })
             TtsState.NO_DATA -> add(chip("TTS voice data missing · tap to install", C.RED) { TtsHelper.install(this) })
             else -> {}
         }
+        chipBar?.visibility = if (Prefs.bool("showChips", true) && chips.childCount > 0) View.VISIBLE else View.GONE
     }
 
     // ───────────────────────── sheets ─────────────────────────
@@ -503,54 +520,62 @@ abstract class BrowserActivity : Activity() {
 
     private fun showMenu() = showSheet("") { body ->
         val t = tab
-        if (!Prefs.bool("showPill", false)) {
-            row(body, if (paused) R.drawable.ic_play else R.drawable.ic_pause, if (paused) "Resume" else "Pause", "Page media") {
-                dismissSheet(); togglePlay()
-            }
-            row(body, R.drawable.ic_auto, "Auto mode", listOf("Off", "Scroll", "Swipe")[mode.coerceIn(0, 2)]) {
-                cycleMode(); sheetRefresh?.invoke()
-            }
-            row(body, R.drawable.ic_ff, "Auto speed", "×$speed") { cycleSpeed(); sheetRefresh?.invoke() }
-            row(body, R.drawable.ic_next, "Next page", "Click the next button now") { dismissSheet(); nextNow() }
+        val hidden = Prefs.list("menuHidden")
+        fun on(id: String) = !hidden.contains(id)
+
+        if (on("play") && !Prefs.bool("showPill", false)) {
+            tileGrid(body, listOf(
+                tile(if (paused) R.drawable.ic_play else R.drawable.ic_pause, if (paused) "Resume" else "Pause", null, C.GOLD) { dismissSheet(); togglePlay() },
+                tile(R.drawable.ic_auto, "Auto", listOf("Off", "Scroll", "Swipe")[mode.coerceIn(0, 2)], if (mode == 0) C.MUTED else C.GOLD) { cycleMode(); sheetRefresh?.invoke() },
+                tile(R.drawable.ic_ff, "Speed", "×$speed") { cycleSpeed(); sheetRefresh?.invoke() },
+                tile(R.drawable.ic_next, "Next") { dismissSheet(); nextNow() }
+            ))
         }
-        row(body, R.drawable.ic_add, "New tab") { dismissSheet(); newTab() }
+
+        val tiles = ArrayList<View>()
+        if (on("newtab")) tiles.add(tile(R.drawable.ic_add, "New tab") { dismissSheet(); newTab() })
         if (kind == K_NORMAL) {
-            row(body, R.drawable.ic_incognito, "New incognito tab") { dismissSheet(); openIncognito(null) }
-            row(body, R.drawable.ic_tor, "New Tor tab") { dismissSheet(); openTor(null) }
+            if (on("incog")) tiles.add(tile(R.drawable.ic_incognito, "Incognito") { dismissSheet(); openIncognito(null) })
+            if (on("tor")) tiles.add(tile(R.drawable.ic_tor, "Tor") { dismissSheet(); openTor(null) })
         } else {
-            row(body, R.drawable.ic_add, "New normal tab") { dismissSheet(); openNormal() }
+            tiles.add(tile(R.drawable.ic_add, "Normal tab") { dismissSheet(); openNormal() })
         }
-        row(body, R.drawable.ic_forward, "Forward") { dismissSheet(); tab?.web?.let { if (it.canGoForward()) it.goForward() } }
-        row(body, R.drawable.ic_desktop, "Desktop site", if (t?.desktop == true) "On" else "Off") {
-            dismissSheet()
-            val x = tab
-            if (x != null) { x.desktop = !x.desktop; applySettings(x); x.web.reload() }
+        if (kind == K_TOR && on("identity")) tiles.add(tile(R.drawable.ic_tor, "New identity", null, C.PURPLE) { dismissSheet(); confirmNewIdentity() })
+        if (kind != K_TOR && on("desktop")) {
+            val d = t?.desktop == true
+            tiles.add(tile(R.drawable.ic_desktop, "Desktop", if (d) "On" else "Off", if (d) C.GOLD else C.TEXT) {
+                dismissSheet()
+                val x = tab
+                if (x != null) { x.desktop = !x.desktop; applySettings(x); x.web.reload() }
+            })
         }
+        if (on("forward")) tiles.add(tile(R.drawable.ic_forward, "Forward") { dismissSheet(); tab?.web?.let { if (it.canGoForward()) it.goForward() } })
+        if (on("copy")) tiles.add(tile(R.drawable.ic_copy, "Copy link") { dismissSheet(); copyLink() })
+        if (on("share")) tiles.add(tile(R.drawable.ic_share, "Share") { dismissSheet(); shareLink() })
+        if (kind == K_NORMAL && on("history")) tiles.add(tile(R.drawable.ic_history, "History") { showHistory() })
+        if (tiles.isNotEmpty()) tileGrid(body, tiles)
+
         if (kind == K_NORMAL && t?.host != null) {
             val h = t.host!!
-            val on = Prefs.list("torHosts").contains(h)
-            row(body, R.drawable.ic_tor, "Always use Tor for this site", if (on) "On for $h" else "Off") {
+            val torOn = Prefs.list("torHosts").contains(h)
+            row(body, R.drawable.ic_tor, "Always use Tor for this site", if (torOn) "On for $h" else "Off") {
                 dismissSheet()
                 val s = Prefs.list("torHosts")
-                if (on) s.remove(h) else s.add(h)
+                if (torOn) s.remove(h) else s.add(h)
                 Prefs.putList("torHosts", s)
-                if (!on) openTor(t.url)
+                if (!torOn) openTor(t.url)
             }
         }
-        if (kind == K_NORMAL) row(body, R.drawable.ic_history, "History") { showHistory() }
-        row(body, R.drawable.ic_check, "Copy link") { dismissSheet(); copyLink() }
-        row(body, R.drawable.ic_forward, "Share link") { dismissSheet(); shareLink() }
         row(body, R.drawable.ic_settings, "Settings") { dismissSheet(); startActivity(Intent(this, SettingsActivity::class.java)) }
-        row(body, R.drawable.ic_trash, "Clear data", if (kind == K_NORMAL) "Cookies, cache, site data, history" else "Wipe this private session") {
+        row(body, R.drawable.ic_trash, "Clear data", if (kind == K_NORMAL) "Cookies, cache, history" else "Wipe this private session") {
             dismissSheet()
-            AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            AlertDialog.Builder(this, dialogTheme())
                 .setTitle("Clear data?")
                 .setMessage(if (kind == K_NORMAL) "Cookies, cache, site data and history will be deleted." else "Everything in this private session will be wiped.")
                 .setPositiveButton("Clear") { _, _ -> clearBrowsingData() }
                 .setNegativeButton("Cancel", null).show()
         }
-        if (kind == K_NORMAL) row(body, R.drawable.ic_check, "Setup checklist") { showChecklist() }
-        row(body, R.drawable.ic_exit, "Exit", "Stop background service and close", C.RED) { dismissSheet(); exitApp() }
+        row(body, R.drawable.ic_exit, "Exit", null, C.RED) { dismissSheet(); exitApp() }
     }
 
     private fun showTabs() = showSheet("Tabs") { body ->
@@ -643,7 +668,7 @@ abstract class BrowserActivity : Activity() {
 
     private fun addTab(url: String?, select: Boolean): Tab {
         val t = Tab(newWeb())
-        t.desktop = Prefs.bool("desktop", false)
+        t.desktop = kind != K_TOR && Prefs.bool("desktop", false)
         tabs.add(t)
         applySettings(t)
         installScripts(t)
@@ -729,18 +754,20 @@ abstract class BrowserActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun applySettings(t: Tab) {
         val s = t.web.settings
-        s.javaScriptEnabled = Prefs.bool("js", true)
-        s.domStorageEnabled = true
-        s.mediaPlaybackRequiresUserGesture = false
+        val lvl = torLevel()
+        s.javaScriptEnabled = if (kind == K_TOR) lvl < 2 else Prefs.bool("js", true)
+        s.domStorageEnabled = !(kind == K_TOR && lvl >= 2)
+        s.mediaPlaybackRequiresUserGesture = kind == K_TOR && lvl >= 1
         s.mixedContentMode = if (httpsOnlyNow()) WebSettings.MIXED_CONTENT_NEVER_ALLOW
         else WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         s.builtInZoomControls = true
         s.displayZoomControls = false
-        s.textZoom = Prefs.int("textSize", 100)
+        s.textZoom = if (kind == K_TOR) 100 else Prefs.int("textSize", 100)
         s.setSupportMultipleWindows(false)
         s.allowFileAccess = false
         s.allowContentAccess = false
         s.setGeolocationEnabled(false)
+        if (kind == K_TOR) s.javaScriptCanOpenWindowsAutomatically = false
         if (kind != K_NORMAL) {
             @Suppress("DEPRECATION")
             s.saveFormData = false
@@ -749,6 +776,7 @@ abstract class BrowserActivity : Activity() {
         }
         val ua = Prefs.str("ua", "")
         s.userAgentString = when {
+            kind == K_TOR -> torUa()
             ua.isNotBlank() -> ua
             t.desktop -> desktopUa()
             else -> null
@@ -758,6 +786,28 @@ abstract class BrowserActivity : Activity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(
             t.web, !(kind == K_TOR || Prefs.bool("cookies3p", false))
         )
+    }
+
+    private fun torLevel(): Int = if (kind == K_TOR) Prefs.int("torLevel", 0).coerceIn(0, 2) else 0
+
+    /** Same user agent for every Tor tab, with no device model or Android build. Only the Chrome version follows the installed WebView. */
+    private fun torUa(): String {
+        val d = WebSettings.getDefaultUserAgent(this)
+        val v = Regex("Chrome/(\\d+)").find(d)?.groupValues?.get(1) ?: "120"
+        return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$v.0.0.0 Mobile Safari/537.36"
+    }
+
+    private fun isLocalHost(h: String?): Boolean {
+        if (h == null) return true
+        val x = h.lowercase().trim('[', ']')
+        if (x.isEmpty() || x.all { it.isDigit() } || x.startsWith("0x")) return true
+        if (x == "localhost" || x.endsWith(".localhost") || x.endsWith(".local") || x.endsWith(".internal") || x.endsWith(".lan")) return true
+        if (x.contains(':') && (x == "::1" || x == "::" || x.startsWith("fe80") || x.startsWith("fc") || x.startsWith("fd") || x.startsWith("::ffff"))) return true
+        val m = Regex("^(\\d+)\\.(\\d+)\\.(\\d+)\\.(\\d+)$").find(x) ?: return false
+        val a = m.groupValues[1].toInt()
+        val b = m.groupValues[2].toInt()
+        return a == 0 || a == 10 || a == 127 || (a == 169 && b == 254) || (a == 172 && b in 16..31) ||
+            (a == 192 && b == 168) || (a == 100 && b in 64..127)
     }
 
     private fun desktopUa(): String {
@@ -776,7 +826,7 @@ abstract class BrowserActivity : Activity() {
         try { t.script?.remove() } catch (_: Exception) {}
         t.script = null
         val sb = StringBuilder(Js.KEEPALIVE)
-        if (kind == K_TOR) sb.append('\n').append(Js.NO_WEBRTC)
+        if (kind == K_TOR) sb.append('\n').append(Js.NO_WEBRTC).append('\n').append(Js.torHarden(torLevel()))
         val nativeTts = Prefs.bool("nativeTts", false)
         t.web.removeJavascriptInterface("BgTts")
         if (nativeTts) {
@@ -793,7 +843,7 @@ abstract class BrowserActivity : Activity() {
 
     private fun settingsSig(): String =
         listOf("js", "desktop", "ua", "textSize", "httpsOnly", "cookies", "cookies3p", "nativeTts",
-            "autoNext", "autoNextSel", "torCookies", "keepAlive", "engine")
+            "autoNext", "autoNextSel", "torCookies", "keepAlive", "engine", "torLevel")
             .joinToString("|") { Prefs.str(it, "") }
 
     private fun applySettingsAll() {
@@ -831,7 +881,8 @@ abstract class BrowserActivity : Activity() {
 
         override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
             val sc = r.url.scheme ?: return null
-            val block = (kind == K_TOR && !TorManager.allowed) || (sc == "http" && httpsOnlyNow())
+            val block = (kind == K_TOR && (!TorManager.allowed || isLocalHost(r.url.host))) ||
+                (sc == "http" && httpsOnlyNow())
             return if (block) blockedResponse() else null
         }
 
@@ -1039,6 +1090,22 @@ abstract class BrowserActivity : Activity() {
         tabs.forEach {
             try { it.web.clearCache(true); it.web.clearFormData(); it.web.clearHistory() } catch (_: Exception) {}
         }
+    }
+
+    private fun confirmNewIdentity() {
+        AlertDialog.Builder(this, dialogTheme())
+            .setTitle("New Tor identity?")
+            .setMessage("Closes all tabs, wipes cookies and site data, and switches to fresh Tor circuits.")
+            .setPositiveButton("New identity") { _, _ -> newIdentity() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun newIdentity() {
+        clearWebData()
+        while (tabs.size > 1) closeTab(tabs.size - 1)
+        TorManager.newIdentity()
+        ui.postDelayed({ tab?.let { loadIn(it, homeUrl()) } }, 800)
+        Toast.makeText(this, "New identity", Toast.LENGTH_SHORT).show()
     }
 
     private fun clearBrowsingData() {

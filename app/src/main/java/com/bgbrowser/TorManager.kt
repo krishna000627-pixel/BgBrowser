@@ -134,13 +134,19 @@ object TorManager {
             if (!alive(g)) return
             if (pct < 100) { fail("Tor did not finish connecting. Check your network and retry."); return }
 
-            setConf("HTTPTunnelPort", "auto")
-            var rule: String? = null
-            for (i in 0 until 10) {
-                val p = port(info("net/listeners/httptunnel"))
-                if (p != null) { rule = "http://127.0.0.1:$p"; break }
-                Thread.sleep(300)
+            fun findHttp(): String? {
+                for (i in 0 until 10) {
+                    val p = port(info("net/listeners/httptunnel"))
+                    if (p != null) return "http://127.0.0.1:$p"
+                    Thread.sleep(300)
+                }
+                return null
             }
+            // Own circuit per destination, so exit relays cannot link the different sites you visit.
+            if (Prefs.bool("torIsolate", true)) setConf("HTTPTunnelPort", "auto IsolateDestAddr")
+            else setConf("HTTPTunnelPort", "auto")
+            var rule: String? = findHttp()
+            if (rule == null) { setConf("HTTPTunnelPort", "auto"); rule = findHttp() }
             if (rule == null) {
                 val p = port(info("net/listeners/socks"))
                 if (p != null) rule = "socks5://127.0.0.1:$p"
@@ -177,6 +183,16 @@ object TorManager {
 
     fun blockAll() { proxy(DEAD, null) }
 
+    /** Asks Tor for fresh circuits (NEWNYM). Callers wipe cookies and site data themselves. */
+    fun newIdentity() {
+        Thread {
+            try {
+                val c = ctl ?: return@Thread
+                c.javaClass.getMethod("signal", String::class.java).invoke(c, "NEWNYM")
+            } catch (_: Exception) {}
+        }.apply { isDaemon = true; start() }
+    }
+
     private fun proxy(rule: String, then: (() -> Unit)?) {
         main.post {
             try {
@@ -184,7 +200,10 @@ object TorManager {
                     fail("This WebView has no proxy support. Update Android System WebView.", false)
                     return@post
                 }
-                val cfg = ProxyConfig.Builder().addProxyRule(rule).build()
+                val b = ProxyConfig.Builder().addProxyRule(rule)
+                // Chromium skips the proxy for localhost by default. Remove that so nothing is reached directly.
+                try { b.javaClass.getMethod("removeImplicitRules").invoke(b) } catch (_: Exception) {}
+                val cfg = b.build()
                 ProxyController.getInstance().setProxyOverride(cfg, Executor { it.run() }, Runnable { then?.invoke() })
             } catch (e: Throwable) {
                 fail("Proxy setup failed: ${e.message ?: e.javaClass.simpleName}", false)

@@ -29,6 +29,7 @@ class WelcomeActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyTheme()
         page = savedInstanceState?.getInt("page", 0) ?: 0
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
