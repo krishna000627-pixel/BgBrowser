@@ -1,8 +1,8 @@
 package com.bgbrowser
 
 object Js {
-    val PAUSE = "window.__autoPause=true;document.querySelectorAll('audio,video').forEach(function(m){m.pause()});try{speechSynthesis.pause()}catch(e){}"
-    val RESUME = "window.__autoPause=false;document.querySelectorAll('audio,video').forEach(function(m){var p=m.play();if(p&&p.catch)p.catch(function(){})});try{speechSynthesis.resume()}catch(e){}"
+    val PAUSE = "window.__autoPause=true;document.querySelectorAll('audio,video').forEach(function(m){m.pause()});try{if(window.__bgPause)window.__bgPause();else speechSynthesis.pause()}catch(e){}"
+    val RESUME = "window.__autoPause=false;document.querySelectorAll('audio,video').forEach(function(m){var p=m.play();if(p&&p.catch)p.catch(function(){})});try{if(window.__bgResume)window.__bgResume();else speechSynthesis.resume()}catch(e){}"
 
     // Page always looks visible/focused; shared "next" finder; Chrome 15s TTS workaround; reports speech state to native.
     val KEEPALIVE = """
@@ -33,7 +33,7 @@ object Js {
   };
   setInterval(function(){
     try{
-      if(window.__bgTts) return;
+      if(window.__bgTts||window.__bgSeam) return;
       var s=window.speechSynthesis;
       if(s&&s.speaking&&!s.paused){s.pause();s.resume();}
     }catch(e){}
@@ -52,7 +52,90 @@ object Js {
 """
 
     // Stops everything the page is saying or playing (speech is cancelled, not just paused).
-    val STOP_ALL = "window.__autoPause=true;try{speechSynthesis.cancel()}catch(e){};document.querySelectorAll('audio,video').forEach(function(m){try{m.pause()}catch(e){}});"
+    val STOP_ALL = "window.__autoPause=true;try{if(window.__bgStop)window.__bgStop();else speechSynthesis.cancel()}catch(e){};document.querySelectorAll('audio,video').forEach(function(m){try{m.pause()}catch(e){}});"
+
+    // Seamless pause/resume for page speech. Android's speechSynthesis.pause() is unreliable, so the page talks
+    // through a proxy utterance. Pause cancels the engine silently and remembers the last word; resume speaks the rest
+    // and feeds the page the events it expects, so the page never notices.
+    val SEAMLESS = """
+(function(){
+  var s=window.speechSynthesis;
+  if(!s||window.__bgSeam||window.__bgTts||!window.SpeechSynthesisUtterance) return;
+  window.__bgSeam=1;
+  var oSpeak=s.speak.bind(s), oCancel=s.cancel.bind(s);
+  var q=[], paused=false;
+
+  function relay(rec,type,e){
+    var u=rec.u, ci=((e&&e.charIndex)||0)+rec.off, ev=null;
+    try{
+      if(type==='error') ev=new SpeechSynthesisErrorEvent('error',{utterance:u,error:(e&&e.error)||'canceled',charIndex:ci});
+      else ev=new SpeechSynthesisEvent(type,{utterance:u,charIndex:ci,charLength:(e&&e.charLength)||0,elapsedTime:(e&&e.elapsedTime)||0,name:(e&&e.name)||''});
+    }catch(x){}
+    if(ev){try{u.dispatchEvent(ev);return;}catch(x){}}
+    var h=u['on'+type];
+    if(typeof h==='function'){try{h.call(u,{type:type,target:u,utterance:u,charIndex:ci,error:e&&e.error});}catch(x){}}
+  }
+  function drop(rec){var i=q.indexOf(rec); if(i>=0) q.splice(i,1);}
+  function fire(rec){
+    var u=rec.u, m=new SpeechSynthesisUtterance(rec.text.substring(rec.off));
+    try{m.lang=u.lang;m.rate=u.rate;m.pitch=u.pitch;m.volume=u.volume;if(u.voice)m.voice=u.voice;}catch(x){}
+    rec.m=m; rec.started=false;
+    m.onstart=function(e){
+      if(rec.m!==m) return;
+      rec.started=true;
+      if(rec.resumed){rec.resumed=false;relay(rec,'resume',e);} else relay(rec,'start',e);
+    };
+    m.onboundary=function(e){
+      if(rec.m!==m) return;
+      rec.last=(e.charIndex||0)+rec.off;
+      relay(rec,'boundary',e);
+    };
+    m.onend=function(e){if(rec.m!==m) return; drop(rec); relay(rec,'end',e);};
+    m.onerror=function(e){if(rec.m!==m) return; drop(rec); relay(rec,'error',e);};
+    oSpeak(m);
+  }
+  function pause(){
+    if(paused) return;
+    paused=true;
+    if(!q.length) return;
+    var head=q[0];
+    if(head.started){ head.off=Math.max(head.off,head.last||0); head.resumed=true; }
+    q.forEach(function(r){r.m=null;});
+    try{oCancel();}catch(x){}
+    if(head.resumed) relay(head,'pause',{charIndex:0});
+  }
+  function resume(){
+    if(!paused) return;
+    paused=false;
+    q.slice().forEach(fire);
+  }
+  function stop(){
+    var old=q.splice(0,q.length);
+    old.forEach(function(r){r.m=null;});
+    paused=false;
+    try{oCancel();}catch(x){}
+    return old;
+  }
+  function def(n,v){try{Object.defineProperty(s,n,{value:v,configurable:true,writable:true});}catch(x){}}
+  function acc(n,fn){try{Object.defineProperty(s,n,{get:fn,configurable:true});}catch(x){}}
+  def('speak',function(u){
+    var rec={u:u,text:String(u.text||''),off:0,last:0,started:false,resumed:false,m:null};
+    q.push(rec);
+    if(!paused) fire(rec);
+  });
+  def('cancel',function(){
+    stop().forEach(function(r){relay(r,'error',{error:'canceled'});});
+  });
+  def('pause',pause);
+  def('resume',resume);
+  acc('speaking',function(){return q.length>0;});
+  acc('pending',function(){return q.length>1;});
+  acc('paused',function(){return paused;});
+  window.__bgPause=pause;
+  window.__bgResume=resume;
+  window.__bgStop=function(){stop();};
+})();
+"""
 
     // Replaces speechSynthesis speak/cancel/pause/resume with Android TextToSpeech (needs the BgTts interface).
     val TTS_SHIM = """

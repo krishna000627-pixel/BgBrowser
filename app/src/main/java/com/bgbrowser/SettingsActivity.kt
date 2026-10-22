@@ -281,7 +281,7 @@ class SettingsActivity : Activity() {
 
     private fun buildControls() {
         var c = section("Floating pill")
-        switchRow(c, "Show control pill", "Play/pause and next on top of the page. Off by default.", "showPill", false)
+        switchRow(c, "Show control pill", "A floating Next page button on top of the page. Off by default.", "showPill", false)
         switchRow(c, "Fade when idle", "Dim the pill a few seconds after you touch the page", "pillFade", true)
         note(c, "With the pill off, the same controls are at the top of the menu.")
 
@@ -323,8 +323,8 @@ class SettingsActivity : Activity() {
             try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) } catch (_: Exception) {}
         }
         choiceRow(c, "When headphones or Bluetooth disconnect", "onDisconnect",
-            listOf("Stop speech", "Pause", "Do nothing"), listOf("stop", "pause", "none"), "stop")
-        note(c, "“Stop speech” cancels the page's voice, so it does not carry on from the phone speaker. Use the sleep timer in the menu to stop everything after a set time.")
+            listOf("Pause", "Stop speech", "Do nothing"), listOf("pause", "stop", "none"), "pause")
+        note(c, "Pause holds the voice at the current word, and Play in the notification carries on from there. “Stop speech” cancels it instead. Use the sleep timer in the menu to stop everything after a set time.")
         switchRow(c, "Launch on boot", "Needs “Display over other apps”", "bootLaunch", true)
         buttonRow(c, "Display over other apps", if (Settings.canDrawOverlays(this)) "Allowed" else "Tap to allow") {
             try { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) } catch (_: Exception) {}
@@ -356,6 +356,7 @@ class SettingsActivity : Activity() {
         buttonRow(c, "System TTS settings", null) {
             try { startActivity(Intent("com.android.settings.TTS_SETTINGS")) } catch (_: Exception) { toast("Not available") }
         }
+        switchRow(c, "Seamless pause and resume", "Pause holds the page's voice at the current word and Play carries on from there. Turn off if a site's reader misbehaves. Reloads open tabs.", "seamless", true)
         switchRow(c, "Native TTS bridge", "Experimental. Replaces the page's speechSynthesis with Android TextToSpeech. Reloads open tabs.", "nativeTts", false)
     }
 
@@ -395,7 +396,7 @@ class SettingsActivity : Activity() {
         note(c, "A browser that keeps a page running in the background, mainly sites that read text aloud. The page never registers a media session, so the app does it for the page.")
 
         c = section("How to use")
-        note(c, "1. Open your reading site and start its voice.\n2. Set a sleep timer from the menu if you will fall asleep.\n3. Lock the screen. Use the notification to pause or resume.\n4. Allow notifications and unrestricted battery so Android does not freeze the page.")
+        note(c, "1. Open your reading site and start its voice.\n2. Set a sleep timer from the menu if you will fall asleep.\n3. Lock the screen. Pause and play from the notification or a headset button; reading carries on from the same word.\n4. Allow notifications and unrestricted battery so Android does not freeze the page.")
 
         c = section("Help")
         buttonRow(c, "Welcome tour", "Show the first-launch screens again") {
@@ -422,7 +423,7 @@ class SettingsActivity : Activity() {
         }
 
         c = section("Good to know")
-        note(c, "Swiping the app out of recents kills the page. Pause relies on the page's own speech pause, so use the sleep timer or “Stop speech” when a site ignores it. Audio over Tor can stutter. Some phone makers need manual battery and autostart settings.")
+        note(c, "Swiping the app out of recents kills the page. Pause and play work on the page's speech, not on a site's own audio player. Audio over Tor can stutter. Some phone makers need manual battery and autostart settings.")
 
         c = section("Credits")
         note(c, "Tor support uses the Guardian Project tor-android library (BSD 3-clause).")

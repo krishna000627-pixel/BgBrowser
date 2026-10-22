@@ -148,7 +148,7 @@ class WelcomeActivity : Activity() {
                 body.addView(h1("Make it yours"))
                 body.addView(para("Everything here is also in Settings."))
                 val c = card()
-                prefSwitch(c, "Show control pill", "Floating play/pause and next buttons. Off keeps the page clean; the same controls are in the menu.", "showPill", false)
+                prefSwitch(c, "Show control pill", "A floating Next page button. Off keeps the page clean; Next is also in the menu.", "showPill", false)
                 prefSwitch(c, "Show status chips", "Background, Tor and voice status above the page", "showChips", true)
                 prefSwitch(c, "Keep screen on", "While the browser is open", "keepScreenOn", false)
             }

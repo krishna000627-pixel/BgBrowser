@@ -54,7 +54,7 @@ object C {
 }
 
 val MENU_TILES = listOf(
-    "play" to "Playback controls", "newtab" to "New tab", "incog" to "Incognito tab", "tor" to "Tor tab",
+    "newtab" to "New tab", "next" to "Next page", "incog" to "Incognito tab", "tor" to "Tor tab",
     "identity" to "New Tor identity", "desktop" to "Desktop site", "forward" to "Forward",
     "copy" to "Copy link", "share" to "Share link", "history" to "History",
     "sleep" to "Sleep timer", "find" to "Find in page", "bookmark" to "Bookmark this page", "torinfo" to "Tor info", "level" to "Tor security level"

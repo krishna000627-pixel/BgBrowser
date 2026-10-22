@@ -55,7 +55,7 @@ open class KeepAliveService : Service() {
     // Headphones or Bluetooth disconnected: stop or pause so the phone speaker does not start talking.
     private val noisy = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, i: Intent?) {
-            when (Prefs.str("onDisconnect", "stop")) {
+            when (Prefs.str("onDisconnect", "pause")) {
                 "pause" -> { setPlaying(false); Bridge.onCommand?.invoke("pause") }
                 "stop" -> { setPlaying(false); Bridge.onCommand?.invoke("stop") }
             }

@@ -94,7 +94,6 @@ abstract class BrowserActivity : Activity() {
     private lateinit var chips: LinearLayout
     private lateinit var pill: LinearLayout
     private var chipBar: View? = null
-    private lateinit var ppBtn: ImageView
     private lateinit var torOverlay: LinearLayout
     private lateinit var torTitle: TextView
     private lateinit var torDetail: TextView
@@ -152,12 +151,10 @@ abstract class BrowserActivity : Activity() {
                             try { it.tts?.stop() } catch (_: Exception) {}
                             it.web.evaluateJavascript(Js.STOP_ALL, null)
                         }
-                        updatePill()
                     }
                     else -> {
                         paused = cmd == "pause"
                         tabs.forEach { it.web.evaluateJavascript(if (paused) Js.PAUSE else Js.RESUME, null) }
-                        updatePill()
                     }
                 }
             }
@@ -380,14 +377,12 @@ abstract class BrowserActivity : Activity() {
         column.addView(bottom, if (barTop) 0 else column.childCount, LinearLayout.LayoutParams(MATCH, WRAP))
 
         // floating control pill
-        ppBtn = iconBtn(R.drawable.ic_pause, 44, C.GOLD) { wake(); togglePlay() }
         pill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = rounded((C.SURFACE2 and 0x00FFFFFF) or (0xF0 shl 24), 28)
             setPadding(dp(6), dp(4), dp(6), dp(4))
             elevation = dpf(8)
-            addView(ppBtn)
             addView(iconBtn(R.drawable.ic_next, 44, C.TEXT) { wake(); nextNow() })
         }
 
@@ -397,7 +392,6 @@ abstract class BrowserActivity : Activity() {
             FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(if (barTop) 24 else if (compact) 64 else 76) }
         )
         setContentView(rootFrame)
-        updatePill()
         updateChips()
         updateLock()
         updateTabsCount()
@@ -424,10 +418,6 @@ abstract class BrowserActivity : Activity() {
         pill.alpha = 1f
         ui.removeCallbacks(fade)
         ui.postDelayed(fade, 3500)
-    }
-
-    private fun updatePill() {
-        ppBtn.setImageResource(if (paused) R.drawable.ic_play else R.drawable.ic_pause)
     }
 
     private fun updateTabsCount() { tabsCount.text = tabs.size.toString() }
@@ -516,15 +506,9 @@ abstract class BrowserActivity : Activity() {
         val hidden = Prefs.list("menuHidden")
         fun on(id: String) = !hidden.contains(id)
 
-        if (on("play") && !Prefs.bool("showPill", false)) {
-            tileGrid(body, listOf(
-                tile(if (paused) R.drawable.ic_play else R.drawable.ic_pause, if (paused) "Resume" else "Pause", null, C.GOLD) { dismissSheet(); togglePlay() },
-                tile(R.drawable.ic_next, "Next") { dismissSheet(); nextNow() }
-            ))
-        }
-
         val tiles = ArrayList<View>()
         if (on("newtab")) tiles.add(tile(R.drawable.ic_add, "New tab") { dismissSheet(); newTab() })
+        if (on("next")) tiles.add(tile(R.drawable.ic_next, "Next page") { dismissSheet(); nextNow() })
         if (kind == K_NORMAL) {
             if (on("incog")) tiles.add(tile(R.drawable.ic_incognito, "Incognito") { dismissSheet(); openIncognito(null) })
             if (on("tor")) tiles.add(tile(R.drawable.ic_tor, "Tor") { dismissSheet(); openTor(null) })
@@ -857,6 +841,7 @@ abstract class BrowserActivity : Activity() {
         if (kind == K_TOR) sb.append('\n').append(Js.NO_WEBRTC).append('\n').append(Js.torHarden(torLevel()))
         val nativeTts = Prefs.bool("nativeTts", false)
         t.web.removeJavascriptInterface("BgTts")
+        if (!nativeTts && Prefs.bool("seamless", true)) sb.append('\n').append(Js.SEAMLESS)
         if (nativeTts) {
             sb.append('\n').append(Js.TTS_SHIM)
             val bridge = t.tts ?: NativeTtsBridge(this) { js -> ui.post { t.web.evaluateJavascript(js, null) } }
@@ -871,7 +856,7 @@ abstract class BrowserActivity : Activity() {
 
     private fun settingsSig(): String =
         listOf("js", "desktop", "ua", "textSize", "httpsOnly", "cookies", "cookies3p", "nativeTts",
-            "torCookies", "keepAlive", "engine", "torLevel")
+            "torCookies", "seamless", "keepAlive", "engine", "torLevel")
             .joinToString("|") { Prefs.str(it, "") }
 
     private fun applySettingsAll() {
@@ -1191,11 +1176,6 @@ abstract class BrowserActivity : Activity() {
         try {
             startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, u), null))
         } catch (_: Exception) {}
-    }
-
-    private fun togglePlay() {
-        val s = Bridge.service
-        if (s != null) s.toggle() else Bridge.onCommand?.invoke(if (paused) "resume" else "pause")
     }
 
     private fun nextNow() {
