@@ -177,7 +177,6 @@ class SettingsActivity : Activity() {
         "browsing" -> "Browsing"
         "controls" -> "Controls & display"
         "privacy" -> "Privacy & cookies"
-        "auto" -> "Auto mode"
         "background" -> "Background"
         "tts" -> "Text-to-speech"
         "tor" -> "Tor"
@@ -208,7 +207,6 @@ class SettingsActivity : Activity() {
             "browsing" -> buildBrowsing()
             "controls" -> buildControls()
             "privacy" -> buildPrivacy()
-            "auto" -> buildAuto()
             "background" -> buildBackground()
             "tts" -> buildTts()
             "tor" -> buildTor()
@@ -226,8 +224,7 @@ class SettingsActivity : Activity() {
         item(R.drawable.ic_desktop, "Browsing", "Search engine, home page, desktop site, text size", "browsing")
         item(R.drawable.ic_play, "Controls & display", "Floating pill, status chips, screen, tabs", "controls")
         item(R.drawable.ic_lock, "Privacy & cookies", "Cookies, history, incognito, cache", "privacy")
-        item(R.drawable.ic_auto, "Auto mode", "Scroll, swipe, speed, auto-next", "auto")
-        item(R.drawable.ic_pause, "Background", "Keep-alive, battery, boot", "background")
+        item(R.drawable.ic_pause, "Background", "Keep-alive, battery, boot, disconnect", "background")
         item(R.drawable.ic_wave, "Text-to-speech", "Voice data, test, native bridge", "tts")
         item(R.drawable.ic_tor, "Tor", "Security level, cookies, always-Tor sites", "tor")
         item(R.drawable.ic_settings, "About", "Version, help, reset", "about")
@@ -284,12 +281,16 @@ class SettingsActivity : Activity() {
 
     private fun buildControls() {
         var c = section("Floating pill")
-        switchRow(c, "Show control pill", "Play/pause, auto mode, speed and next on top of the page. Off by default.", "showPill", false)
+        switchRow(c, "Show control pill", "Play/pause and next on top of the page. Off by default.", "showPill", false)
         switchRow(c, "Fade when idle", "Dim the pill a few seconds after you touch the page", "pillFade", true)
         note(c, "With the pill off, the same controls are at the top of the menu.")
 
         c = section("Display")
         switchRow(c, "Keep screen on", "Stops the screen from turning off while the browser is open", "keepScreenOn", false)
+
+        c = section("Next page button")
+        textRow(c, "Custom selector", "autoNextSel", "CSS selector, e.g. a.next-chapter", "")
+        note(c, "Used by “Next” in the menu. Empty = find a “next” link or button by its text.")
 
         c = section("Tabs")
         switchRow(c, "Restore tabs on start", "Reopen the tabs you had open last time", "restoreTabs", true)
@@ -304,21 +305,12 @@ class SettingsActivity : Activity() {
 
         c = section("Privacy")
         switchRow(c, "New tabs in incognito", "Opening the app also starts in incognito", "incognitoDefault", false)
+        switchRow(c, "Block trackers and ads", "Built-in list of common tracking domains", "blockTrackers", false)
+        switchRow(c, "Strip tracking parameters", "Removes utm_, fbclid, gclid and similar from links", "stripTracking", false)
         switchRow(c, "Save history", null, "saveHistory", true)
         buttonRow(c, "Clear history", null, C.RED) { History.clear(); toast("History cleared") }
         buttonRow(c, "Clear cache", null, C.RED) { clearCache(); toast("Cache cleared") }
         note(c, "Incognito and Tor tabs run in their own process with separate storage. It is wiped when you close them and again at next start. Screenshots are blocked in them.")
-    }
-
-    private fun buildAuto() {
-        val c = section("Auto mode")
-        choiceRow(c, "Default mode", "autoMode", listOf("Off", "Scroll", "Swipe"), listOf("0", "1", "2"), "0")
-        choiceRow(c, "Default speed", "autoSpeed", listOf("1 · slow", "2 · medium", "3 · fast"), listOf("1", "2", "3"), "2")
-        switchRow(c, "Remember per site", "Mode and speed are saved for each site", "rememberSite", true)
-        switchRow(c, "Click “next” at page end", null, "autoNext", true)
-        textRow(c, "Custom “next” selector", "autoNextSel", "CSS selector, e.g. a.next-chapter", "")
-        buttonRow(c, "Forget remembered sites", null) { Prefs.removePrefix("site."); toast("Done") }
-        note(c, "Swipe mode only works with the screen on. Scroll mode works with it off.")
     }
 
     private fun buildBackground() {
@@ -330,6 +322,9 @@ class SettingsActivity : Activity() {
         buttonRow(c, "Unrestricted battery", if (batteryOk) "Allowed" else "Tap to allow") {
             try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) } catch (_: Exception) {}
         }
+        choiceRow(c, "When headphones or Bluetooth disconnect", "onDisconnect",
+            listOf("Stop speech", "Pause", "Do nothing"), listOf("stop", "pause", "none"), "stop")
+        note(c, "“Stop speech” cancels the page's voice, so it does not carry on from the phone speaker. Use the sleep timer in the menu to stop everything after a set time.")
         switchRow(c, "Launch on boot", "Needs “Display over other apps”", "bootLaunch", true)
         buttonRow(c, "Display over other apps", if (Settings.canDrawOverlays(this)) "Allowed" else "Tap to allow") {
             try { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) } catch (_: Exception) {}
@@ -368,8 +363,10 @@ class SettingsActivity : Activity() {
         var c = section("Protection")
         choiceRow(c, "Security level", "torLevel", listOf("Standard", "Safer", "Safest"), listOf("0", "1", "2"), "0")
         note(c, "Standard: fingerprint hardening only. Safer: also removes WebGL and WebAssembly, blocks autoplay and rounds timers more. Safest: JavaScript and site storage off. Most sites look plain, but it removes the biggest attack surface. Open Tor tabs pick the change up when you return to them.")
+        switchRow(c, "Block trackers and ads", "A built-in list of common tracking domains. Also saves Tor bandwidth.", "torTrackers", true)
+        switchRow(c, "Strip tracking parameters", "Removes utm_, fbclid, gclid and similar from links", "torStrip", true)
         switchRow(c, "Separate circuit per site", "Sites you visit cannot be linked at the exit relay. A bit slower. Applies the next time Tor starts.", "torIsolate", true)
-        note(c, "Always on in Tor tabs: same user agent for everyone, UTC time zone, rounded screen size, canvas noise, WebRTC off, no location, no localhost or LAN access, HTTPS only, nothing loads until Tor is verified. Use “New Tor identity” in a Tor tab's menu to wipe everything.")
+        note(c, "Always on in Tor tabs: no referrers on links and forms, no push or service workers, same user agent for everyone, UTC time zone, rounded screen size, canvas noise, WebRTC off, no location, no localhost or LAN access, HTTPS only, nothing loads until Tor is verified. Use “New Tor identity” in a Tor tab's menu to wipe everything.")
 
         c = section("Tor")
         switchRow(c, "Allow session cookies in Tor tabs", "Off = no cookies at all. On = logins work until you close the tab.", "torCookies", false)
@@ -395,10 +392,10 @@ class SettingsActivity : Activity() {
         var c = section("BG Browser")
         row(c, null, "Version", ver)
         row(c, null, "Package", packageName)
-        note(c, "A browser that keeps a page running in the background, mainly sites that read text aloud and auto-scroll or auto-next. The page never registers a media session, so the app does it for the page.")
+        note(c, "A browser that keeps a page running in the background, mainly sites that read text aloud. The page never registers a media session, so the app does it for the page.")
 
         c = section("How to use")
-        note(c, "1. Open your reading site and start its voice.\n2. Turn on Auto mode from the menu (scroll works with the screen off).\n3. Lock the screen. Use the notification to pause or resume.\n4. Allow notifications and unrestricted battery so Android does not freeze the page.")
+        note(c, "1. Open your reading site and start its voice.\n2. Set a sleep timer from the menu if you will fall asleep.\n3. Lock the screen. Use the notification to pause or resume.\n4. Allow notifications and unrestricted battery so Android does not freeze the page.")
 
         c = section("Help")
         buttonRow(c, "Welcome tour", "Show the first-launch screens again") {
@@ -425,7 +422,7 @@ class SettingsActivity : Activity() {
         }
 
         c = section("Good to know")
-        note(c, "Swiping the app out of recents kills the page. Auto-next is a text guess, so use the custom selector if a site needs it. Swipe mode only works with the screen on. Audio over Tor can stutter. Some phone makers need manual battery and autostart settings.")
+        note(c, "Swiping the app out of recents kills the page. Pause relies on the page's own speech pause, so use the sleep timer or “Stop speech” when a site ignores it. Audio over Tor can stutter. Some phone makers need manual battery and autostart settings.")
 
         c = section("Credits")
         note(c, "Tor support uses the Guardian Project tor-android library (BSD 3-clause).")

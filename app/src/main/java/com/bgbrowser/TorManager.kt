@@ -26,6 +26,7 @@ object TorManager {
     @Volatile var verified = false
     @Volatile var progress = 0
     @Volatile var detail = ""
+    @Volatile var exitIp = ""
     @Volatile var listener: (() -> Unit)? = null
 
     /** Pages may only load when Tor is up and the exit was verified. */
@@ -217,6 +218,9 @@ object TorManager {
             c.javaClass.getMethod("getInfo", String::class.java).invoke(c, key) as? String
         } catch (e: Exception) { null }
     }
+
+    /** Reads a Tor control value. Blocking, so call it off the main thread. */
+    fun query(key: String): String? = info(key)
 
     private fun setConf(k: String, v: String) {
         try {

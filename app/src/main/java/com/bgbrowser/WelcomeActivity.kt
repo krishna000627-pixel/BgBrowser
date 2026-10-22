@@ -110,7 +110,7 @@ class WelcomeActivity : Activity() {
                 body.addView(para("Keeps a web page running, and reading aloud, while your screen is off."))
                 val c = card()
                 row(c, R.drawable.ic_wave, "Background playback", "A media notification keeps the page alive and lets you pause or resume.")
-                row(c, R.drawable.ic_auto, "Auto scroll and next", "Pages scroll and move on to the next chapter by themselves.")
+                row(c, R.drawable.ic_timer, "Sleep timer", "Stops the voice, the browser and the background service after a set time.")
                 row(c, R.drawable.ic_incognito, "Private tabs and Tor", "Incognito tabs and a Tor mode that never falls back to a direct connection.")
             }
             1 -> {
@@ -118,7 +118,7 @@ class WelcomeActivity : Activity() {
                 body.addView(para("Three steps and you can lock the phone."))
                 val c = card()
                 row(c, null, "1  Open your site", "Go to the page you read and start its voice.")
-                row(c, null, "2  Turn on Auto mode", "Use the menu. Scroll mode keeps going with the screen off.")
+                row(c, null, "2  Set a sleep timer", "Optional. In the menu, so it stops by itself when you fall asleep.")
                 row(c, null, "3  Lock the screen", "Control playback from the notification.")
             }
             2 -> {
@@ -148,7 +148,7 @@ class WelcomeActivity : Activity() {
                 body.addView(h1("Make it yours"))
                 body.addView(para("Everything here is also in Settings."))
                 val c = card()
-                prefSwitch(c, "Show control pill", "Floating play/pause, auto and next buttons. Off keeps the page clean; the same controls are in the menu.", "showPill", false)
+                prefSwitch(c, "Show control pill", "Floating play/pause and next buttons. Off keeps the page clean; the same controls are in the menu.", "showPill", false)
                 prefSwitch(c, "Show status chips", "Background, Tor and voice status above the page", "showChips", true)
                 prefSwitch(c, "Keep screen on", "While the browser is open", "keepScreenOn", false)
             }

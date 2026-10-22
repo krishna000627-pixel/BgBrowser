@@ -10,6 +10,7 @@ class App : Application() {
         super.onCreate()
         Prefs.init(this)
         History.init(this)
+        Bookmarks.init(this)
         val suffix = when (procName()) {
             "$packageName:incognito" -> "incognito"
             "$packageName:tor" -> "tor"

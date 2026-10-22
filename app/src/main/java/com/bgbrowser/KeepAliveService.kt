@@ -5,11 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.IntentFilter
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -49,7 +52,21 @@ open class KeepAliveService : Service() {
     private var speaking = false
     private var title = "Background Browser"
 
+    // Headphones or Bluetooth disconnected: stop or pause so the phone speaker does not start talking.
+    private val noisy = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            when (Prefs.str("onDisconnect", "stop")) {
+                "pause" -> { setPlaying(false); Bridge.onCommand?.invoke("pause") }
+                "stop" -> { setPlaying(false); Bridge.onCommand?.invoke("stop") }
+            }
+        }
+    }
+
     override fun onBind(i: Intent?): IBinder? = null
+
+    fun refreshNotification() {
+        main.post { try { notifyNow() } catch (_: Exception) {} }
+    }
 
     fun isPlaying(): Boolean = playing
 
@@ -77,6 +94,7 @@ open class KeepAliveService : Service() {
 
         acquireLocks()
         startSilence()
+        try { registerReceiver(noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)) } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -150,7 +168,8 @@ open class KeepAliveService : Service() {
             this, 1, Intent(this, javaClass).setAction(ACTION_TOGGLE),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val text = if (speaking) "Reading aloud · running in background" else "Running in background"
+        var text = if (speaking) "Reading aloud · running in background" else "Running in background"
+        if (SleepTimer.active()) text += " · sleep in ${SleepTimer.remainingMinutes()} min"
         return NotificationCompat.Builder(this, CH)
             .setSmallIcon(R.drawable.ic_wave)
             .setContentTitle(if (privateMode) "Private session" else title)
@@ -214,6 +233,7 @@ open class KeepAliveService : Service() {
     }
 
     override fun onDestroy() {
+        try { unregisterReceiver(noisy) } catch (_: Exception) {}
         running = false
         try { track?.stop(); track?.release() } catch (_: Exception) {}
         wake?.let { if (it.isHeld) it.release() }

@@ -75,8 +75,6 @@ abstract class BrowserActivity : Activity() {
     private var cur = -1
     private val tab: Tab? get() = tabs.getOrNull(cur)
 
-    private var mode = 0      // 0 off, 1 scroll (JS), 2 swipe (touch)
-    private var speed = 2     // 1..3
     private var paused = false
     private var pendingUrl: String? = null
     private var ttsState = TtsState.UNKNOWN
@@ -97,8 +95,6 @@ abstract class BrowserActivity : Activity() {
     private lateinit var pill: LinearLayout
     private var chipBar: View? = null
     private lateinit var ppBtn: ImageView
-    private lateinit var autoBtn: ImageView
-    private lateinit var speedBtn: TextView
     private lateinit var torOverlay: LinearLayout
     private lateinit var torTitle: TextView
     private lateinit var torDetail: TextView
@@ -106,14 +102,6 @@ abstract class BrowserActivity : Activity() {
     private var sheet: FrameLayout? = null
     private var sheetRefresh: (() -> Unit)? = null
 
-    private val swipeLoop = object : Runnable {
-        override fun run() {
-            if (mode == 2) {
-                if (!paused) swipeUp()
-                ui.postDelayed(this, longArrayOf(8000, 5000, 3000)[speed - 1])
-            }
-        }
-    }
     private val fade = Runnable {
         if (Prefs.bool("pillFade", true)) pill.animate().alpha(0.25f).setDuration(400).start()
     }
@@ -143,17 +131,35 @@ abstract class BrowserActivity : Activity() {
         if (kind == K_NORMAL && Prefs.bool("clearOnExit", false) && Prefs.bool("sessionOpen", false)) clearWebData()
         if (kind == K_NORMAL) Prefs.put("sessionOpen", "1")
 
-        mode = Prefs.int("autoMode", 0).coerceIn(0, 2)
-        speed = Prefs.int("autoSpeed", 2).coerceIn(1, 3)
-
         buildUi()
         applyCookiePolicy()
 
+        SleepTimer.onChange = { ui.post { updateChips() } }
         Bridge.onCommand = { cmd ->
             ui.post {
-                paused = cmd == "pause"
-                tabs.forEach { it.web.evaluateJavascript(if (paused) Js.PAUSE else Js.RESUME, null) }
-                updatePill()
+                when (cmd) {
+                    "sleep" -> {
+                        // Sleep timer ended: silence every tab, then close the browser.
+                        tabs.forEach {
+                            it.tts?.shutdown()
+                            try { it.web.evaluateJavascript(Js.STOP_ALL, null); it.web.loadUrl("about:blank") } catch (_: Exception) {}
+                        }
+                        finishAndRemoveTask()
+                    }
+                    "stop" -> {
+                        paused = true
+                        tabs.forEach {
+                            try { it.tts?.stop() } catch (_: Exception) {}
+                            it.web.evaluateJavascript(Js.STOP_ALL, null)
+                        }
+                        updatePill()
+                    }
+                    else -> {
+                        paused = cmd == "pause"
+                        tabs.forEach { it.web.evaluateJavascript(if (paused) Js.PAUSE else Js.RESUME, null) }
+                        updatePill()
+                    }
+                }
             }
         }
         if (kind == K_TOR) initTor()
@@ -375,13 +381,6 @@ abstract class BrowserActivity : Activity() {
 
         // floating control pill
         ppBtn = iconBtn(R.drawable.ic_pause, 44, C.GOLD) { wake(); togglePlay() }
-        autoBtn = iconBtn(R.drawable.ic_auto, 44, C.MUTED) { wake(); cycleMode() }
-        speedBtn = label("×2", 14f, C.TEXT, true).apply {
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
-            background = ripple(Color.TRANSPARENT, 22)
-            setOnClickListener { wake(); cycleSpeed() }
-        }
         pill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -389,8 +388,6 @@ abstract class BrowserActivity : Activity() {
             setPadding(dp(6), dp(4), dp(6), dp(4))
             elevation = dpf(8)
             addView(ppBtn)
-            addView(autoBtn)
-            addView(speedBtn)
             addView(iconBtn(R.drawable.ic_next, 44, C.TEXT) { wake(); nextNow() })
         }
 
@@ -431,8 +428,6 @@ abstract class BrowserActivity : Activity() {
 
     private fun updatePill() {
         ppBtn.setImageResource(if (paused) R.drawable.ic_play else R.drawable.ic_pause)
-        autoBtn.setColorFilter(if (mode == 0) C.MUTED else C.GOLD)
-        speedBtn.text = "×$speed"
     }
 
     private fun updateTabsCount() { tabsCount.text = tabs.size.toString() }
@@ -469,9 +464,7 @@ abstract class BrowserActivity : Activity() {
             K_INCOG -> add(chip("Incognito", C.PURPLE))
             else -> if (all) add(chip("Tor off", C.MUTED) { openTor(null) })
         }
-        if (mode != 0 || all) {
-            add(chip(if (mode == 0) "Auto off" else "Auto ${if (mode == 1) "scroll" else "swipe"} ×$speed", if (mode == 0) C.MUTED else C.GOLD))
-        }
+        if (SleepTimer.active()) add(chip("Sleep in ${SleepTimer.remainingMinutes()} min", C.GOLD) { showSleep() })
         when (ttsState) {
             TtsState.NO_ENGINE -> add(chip("No TTS engine · tap to install", C.RED) { TtsHelper.install(this) })
             TtsState.NO_DATA -> add(chip("TTS voice data missing · tap to install", C.RED) { TtsHelper.install(this) })
@@ -526,8 +519,6 @@ abstract class BrowserActivity : Activity() {
         if (on("play") && !Prefs.bool("showPill", false)) {
             tileGrid(body, listOf(
                 tile(if (paused) R.drawable.ic_play else R.drawable.ic_pause, if (paused) "Resume" else "Pause", null, C.GOLD) { dismissSheet(); togglePlay() },
-                tile(R.drawable.ic_auto, "Auto", listOf("Off", "Scroll", "Swipe")[mode.coerceIn(0, 2)], if (mode == 0) C.MUTED else C.GOLD) { cycleMode(); sheetRefresh?.invoke() },
-                tile(R.drawable.ic_ff, "Speed", "×$speed") { cycleSpeed(); sheetRefresh?.invoke() },
                 tile(R.drawable.ic_next, "Next") { dismissSheet(); nextNow() }
             ))
         }
@@ -553,6 +544,20 @@ abstract class BrowserActivity : Activity() {
         if (on("copy")) tiles.add(tile(R.drawable.ic_copy, "Copy link") { dismissSheet(); copyLink() })
         if (on("share")) tiles.add(tile(R.drawable.ic_share, "Share") { dismissSheet(); shareLink() })
         if (kind == K_NORMAL && on("history")) tiles.add(tile(R.drawable.ic_history, "History") { showHistory() })
+        if (on("sleep")) {
+            val a = SleepTimer.active()
+            tiles.add(tile(R.drawable.ic_timer, "Sleep", if (a) "${SleepTimer.remainingMinutes()} min" else null, if (a) C.GOLD else C.TEXT) { showSleep() })
+        }
+        if (on("find")) tiles.add(tile(R.drawable.ic_search, "Find") { dismissSheet(); showFind() })
+        if (kind == K_NORMAL && on("bookmark")) {
+            val bm = currentUrl()?.let { Bookmarks.has(it) } == true
+            tiles.add(tile(R.drawable.ic_star, "Bookmark", if (bm) "Saved" else null, if (bm) C.GOLD else C.TEXT) { toggleBookmark(); sheetRefresh?.invoke() })
+        }
+        if (kind == K_TOR && on("torinfo")) tiles.add(tile(R.drawable.ic_tor, "Tor info") { dismissSheet(); showTorInfo() })
+        if (kind == K_TOR && on("level")) {
+            val names = listOf("Standard", "Safer", "Safest")
+            tiles.add(tile(R.drawable.ic_lock, "Safety", names[torLevel()], if (torLevel() > 0) C.GOLD else C.TEXT) { cycleTorLevel(); sheetRefresh?.invoke() })
+        }
         if (tiles.isNotEmpty()) tileGrid(body, tiles)
 
         if (kind == K_NORMAL && t?.host != null) {
@@ -566,6 +571,7 @@ abstract class BrowserActivity : Activity() {
                 if (!torOn) openTor(t.url)
             }
         }
+        if (kind == K_NORMAL) row(body, R.drawable.ic_star, "Bookmarks") { showBookmarks() }
         row(body, R.drawable.ic_settings, "Settings") { dismissSheet(); startActivity(Intent(this, SettingsActivity::class.java)) }
         row(body, R.drawable.ic_trash, "Clear data", if (kind == K_NORMAL) "Cookies, cache, history" else "Wipe this private session") {
             dismissSheet()
@@ -691,8 +697,6 @@ abstract class BrowserActivity : Activity() {
         t.web.requestFocus()
         t.lazyUrl?.let { t.lazyUrl = null; loadIn(t, it) }
         urlBox.setText(display(t.url))
-        applySiteState(t.host)
-        applyAuto()
         progressBar.visibility = if (t.progress in 1..99) View.VISIBLE else View.GONE
         reloadBtn.setImageResource(if (t.progress < 100) R.drawable.ic_close else R.drawable.ic_reload)
         updateLock()
@@ -788,6 +792,30 @@ abstract class BrowserActivity : Activity() {
         )
     }
 
+    private val blockedN = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun trackerBlockNow() = if (kind == K_TOR) Prefs.bool("torTrackers", true) else Prefs.bool("blockTrackers", false)
+
+    private val trackParams = setOf(
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id", "fbclid", "gclid", "dclid",
+        "msclkid", "mc_cid", "mc_eid", "igshid", "yclid", "twclid", "ttclid", "li_fat_id", "wbraid", "gbraid",
+        "srsltid", "_hsenc", "_hsmi", "mkt_tok", "vero_id", "oly_enc_id", "oly_anon_id"
+    )
+
+    /** Removes well-known tracking parameters from a link. Tor tabs do this by default. */
+    private fun cleanUrl(raw: String): String {
+        val on = if (kind == K_TOR) Prefs.bool("torStrip", true) else Prefs.bool("stripTracking", false)
+        if (!on) return raw
+        val u = try { Uri.parse(raw) } catch (_: Exception) { return raw }
+        val names = try { u.queryParameterNames } catch (_: Exception) { return raw }
+        if (names.none { it.lowercase() in trackParams }) return raw
+        val b = u.buildUpon().clearQuery()
+        for (n in names) {
+            if (n.lowercase() !in trackParams) for (x in u.getQueryParameters(n)) b.appendQueryParameter(n, x)
+        }
+        return b.build().toString()
+    }
+
     private fun torLevel(): Int = if (kind == K_TOR) Prefs.int("torLevel", 0).coerceIn(0, 2) else 0
 
     /** Same user agent for every Tor tab, with no device model or Android build. Only the Chrome version follows the installed WebView. */
@@ -843,7 +871,7 @@ abstract class BrowserActivity : Activity() {
 
     private fun settingsSig(): String =
         listOf("js", "desktop", "ua", "textSize", "httpsOnly", "cookies", "cookies3p", "nativeTts",
-            "autoNext", "autoNextSel", "torCookies", "keepAlive", "engine", "torLevel")
+            "torCookies", "keepAlive", "engine", "torLevel")
             .joinToString("|") { Prefs.str(it, "") }
 
     private fun applySettingsAll() {
@@ -872,6 +900,10 @@ abstract class BrowserActivity : Activity() {
                 }
                 return true
             }
+            if (r.isForMainFrame) {
+                val cl = cleanUrl(u.toString())
+                if (cl != u.toString()) { v.loadUrl(cl); return true }
+            }
             if (kind == K_NORMAL && r.isForMainFrame) {
                 val h = u.host
                 if (h != null && Prefs.list("torHosts").contains(h)) { openTor(u.toString()); return true }
@@ -881,8 +913,16 @@ abstract class BrowserActivity : Activity() {
 
         override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
             val sc = r.url.scheme ?: return null
-            val block = (kind == K_TOR && (!TorManager.allowed || isLocalHost(r.url.host))) ||
+            var block = (kind == K_TOR && (!TorManager.allowed || isLocalHost(r.url.host))) ||
                 (sc == "http" && httpsOnlyNow())
+            if (!block && kind == K_TOR && torLevel() >= 1 && !r.isForMainFrame) {
+                val p = r.url.path?.lowercase() ?: ""
+                if (p.endsWith(".woff") || p.endsWith(".woff2") || p.endsWith(".ttf") || p.endsWith(".otf") || p.endsWith(".eot")) block = true
+            }
+            if (!block && !r.isForMainFrame && trackerBlockNow() && Blocklist.isTracker(r.url.host)) {
+                blockedN.incrementAndGet()
+                block = true
+            }
             return if (block) blockedResponse() else null
         }
 
@@ -897,14 +937,12 @@ abstract class BrowserActivity : Activity() {
             val h = hostOf(url)
             if (h != t.host) {
                 t.host = h
-                if (t === tab) { applySiteState(h); applyAuto() }
             }
         }
 
         override fun onPageFinished(v: WebView, url: String?) {
             val t = tabOf(v) ?: return
             v.evaluateJavascript(t.injected, null)
-            if (t === tab) v.evaluateJavascript(autoJs(), null)
             if (kind == K_NORMAL && Prefs.bool("saveHistory", true) && url != null) History.add(url, v.title ?: "")
         }
     }
@@ -961,6 +999,7 @@ abstract class BrowserActivity : Activity() {
     private fun loadIn(t: Tab, raw: String) {
         var url = raw
         if (httpsOnlyNow() && url.startsWith("http://")) url = "https://" + url.substring(7)
+        url = cleanUrl(url)
         if (kind == K_NORMAL) {
             val h = hostOf(url)
             if (h != null && Prefs.list("torHosts").contains(h)) { openTor(url); return }
@@ -994,44 +1033,148 @@ abstract class BrowserActivity : Activity() {
         startActivity(Intent(this, MainActivity::class.java).putExtra("noRedirect", true))
     }
 
-    // ───────────────────────── auto mode ─────────────────────────
+    private fun cycleTorLevel() {
+        Prefs.put("torLevel", ((torLevel() + 1) % 3).toString())
+        tabs.forEach { applySettings(it); installScripts(it) }
+        tab?.web?.reload()
+    }
 
-    private fun applySiteState(host: String?) {
-        var m = Prefs.int("autoMode", 0)
-        var sp = Prefs.int("autoSpeed", 2)
-        if (kind == K_NORMAL && host != null && Prefs.bool("rememberSite", true)) {
-            val p = Prefs.str("site.$host", "").split(",")
-            if (p.size == 2) { m = p[0].toIntOrNull() ?: m; sp = p[1].toIntOrNull() ?: sp }
+    private fun bytes(n: Long?): String = when {
+        n == null -> "?"
+        n < 1024 -> "$n B"
+        n < 1048576 -> "${n / 1024} KB"
+        else -> "${n / 1048576} MB"
+    }
+
+    private fun showTorInfo() {
+        Thread {
+            val ver = TorManager.query("version") ?: "?"
+            val circ = TorManager.query("circuit-status") ?: ""
+            val rd = TorManager.query("traffic/read")?.trim()?.toLongOrNull()
+            val wr = TorManager.query("traffic/written")?.trim()?.toLongOrNull()
+            var path = ""
+            var open = 0
+            for (line in circ.lines()) {
+                if (line.contains(" BUILT ") && line.contains("PURPOSE=GENERAL")) {
+                    open++
+                    if (path.isEmpty()) {
+                        val hops = line.trim().split(" ").getOrNull(2) ?: ""
+                        path = hops.split(",").joinToString(" → ") { it.substringAfter('~', it) }
+                    }
+                }
+            }
+            val msg = "Tor " + ver.trim() +
+                "\nExit IP: " + (TorManager.exitIp.ifBlank { "unknown" }) +
+                "\nCircuit: " + (path.ifBlank { "none yet" }) +
+                "\nOpen circuits: " + open +
+                "\nDownloaded: " + bytes(rd) + "   Uploaded: " + bytes(wr) +
+                "\nBlocked requests: " + blockedN.get() +
+                "\nSecurity level: " + listOf("Standard", "Safer", "Safest")[torLevel()]
+            ui.post {
+                AlertDialog.Builder(this, dialogTheme())
+                    .setTitle("Tor info")
+                    .setMessage(msg)
+                    .setPositiveButton("OK", null).show()
+            }
+        }.apply { isDaemon = true; start() }
+    }
+
+    private fun showSleep() = showSheet("Sleep timer") { body ->
+        if (SleepTimer.active()) {
+            row(body, R.drawable.ic_close, "Cancel timer", "${SleepTimer.remainingMinutes()} min left", C.RED) {
+                dismissSheet(); SleepTimer.cancel()
+                Toast.makeText(this, "Sleep timer off", Toast.LENGTH_SHORT).show()
+            }
         }
-        mode = m.coerceIn(0, 2)
-        speed = sp.coerceIn(1, 3)
+        val opts = listOf(5, 10, 15, 30, 45, 60, 90, 120)
+        tileGrid(body, opts.map { m ->
+            tile(R.drawable.ic_timer, if (m >= 60) "${m / 60} h" + (if (m % 60 != 0) " ${m % 60}m" else "") else "$m min") {
+                dismissSheet(); startSleep(m)
+            }
+        })
+        row(body, R.drawable.ic_add, "Custom…", "Pick the minutes") { dismissSheet(); askSleepMinutes() }
+        body.addView(label("When the timer ends, speech and media are cancelled, the browser closes and the background service stops.", 12f, C.MUTED).apply { setPadding(dp(14), dp(8), dp(14), dp(4)) })
     }
 
-    private fun saveSite() {
-        val h = tab?.host
-        if (kind == K_NORMAL && h != null && Prefs.bool("rememberSite", true)) Prefs.put("site.$h", "$mode,$speed")
-    }
-
-    private fun autoJs(): String {
-        val sel = Prefs.str("autoNextSel", "")
-        return Js.AUTO
-            .replace("__SEL__", JSONObject.quote(sel))
-            .replace("__PAUSED__", paused.toString())
-            .replace("__ON__", (mode == 1).toString())
-            .replace("__PX__", intArrayOf(3, 6, 12)[speed - 1].toString())
-            .replace("__CLICK__", Prefs.bool("autoNext", true).toString())
-    }
-
-    private fun applyAuto() {
-        ui.removeCallbacks(swipeLoop)
-        tab?.web?.evaluateJavascript(autoJs(), null)
-        if (mode == 2) ui.postDelayed(swipeLoop, 2000)
-        updatePill()
+    private fun startSleep(m: Int) {
+        SleepTimer.start(this, m)
+        Toast.makeText(this, "Stopping in $m min", Toast.LENGTH_SHORT).show()
         updateChips()
     }
 
-    private fun cycleMode() { mode = (mode + 1) % 3; saveSite(); applyAuto() }
-    private fun cycleSpeed() { speed = speed % 3 + 1; saveSite(); applyAuto() }
+    private fun askSleepMinutes() {
+        val et = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine()
+            setTextColor(C.TEXT)
+            setHintTextColor(C.MUTED)
+            hint = "Minutes (1 to 600)"
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+        AlertDialog.Builder(this, dialogTheme())
+            .setTitle("Sleep timer")
+            .setView(et)
+            .setPositiveButton("Start") { _, _ ->
+                val m = et.text.toString().trim().toIntOrNull()
+                if (m != null && m in 1..600) startSleep(m)
+                else Toast.makeText(this, "Enter 1 to 600", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun showFind() {
+        val w = tab?.web ?: return
+        val et = EditText(this).apply {
+            setSingleLine()
+            setTextColor(C.TEXT)
+            setHintTextColor(C.MUTED)
+            hint = "Find in page"
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+        var last = ""
+        val d = AlertDialog.Builder(this, dialogTheme())
+            .setView(et)
+            .setPositiveButton("Next", null)
+            .setNegativeButton("Close", null)
+            .setOnDismissListener { try { w.clearMatches() } catch (_: Exception) {} }
+            .create()
+        d.show()
+        d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val q = et.text.toString()
+            if (q.isEmpty()) return@setOnClickListener
+            if (q != last) { last = q; w.findAllAsync(q) } else w.findNext(true)
+        }
+    }
+
+    private fun toggleBookmark() {
+        val u = currentUrl()
+        if (u == null) { Toast.makeText(this, "No page to bookmark", Toast.LENGTH_SHORT).show(); return }
+        if (Bookmarks.has(u)) {
+            Bookmarks.remove(u)
+            Toast.makeText(this, "Bookmark removed", Toast.LENGTH_SHORT).show()
+        } else {
+            val title = tab?.title ?: ""
+            Bookmarks.add(u, title.ifBlank { u })
+            Toast.makeText(this, "Bookmarked", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun showBookmarks() = showSheet("Bookmarks") { body ->
+        val items = Bookmarks.items()
+        if (items.isEmpty()) row(body, null, "No bookmarks yet", "Use the star in the menu")
+        for (b in items) {
+            val del = ImageView(this).apply {
+                setImageResource(R.drawable.ic_close)
+                setColorFilter(C.MUTED)
+                layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+                setOnClickListener { Bookmarks.remove(b.url); sheetRefresh?.invoke() }
+            }
+            row(body, null, b.title.ifBlank { b.url }, display(b.url), trailing = del) {
+                dismissSheet()
+                tab?.let { loadIn(it, b.url) }
+            }
+        }
+    }
 
     private fun currentUrl(): String? = tab?.url?.takeIf { it.startsWith("http") }
 
@@ -1058,24 +1201,6 @@ abstract class BrowserActivity : Activity() {
     private fun nextNow() {
         val sel = JSONObject.quote(Prefs.str("autoNextSel", ""))
         tab?.web?.evaluateJavascript("window.__bgSel=$sel;window.__bgNext&&window.__bgNext()", null)
-    }
-
-    // Real touch swipe (works while the screen is on).
-    private fun swipeUp() {
-        val w = tab?.web ?: return
-        val x = w.width / 2f
-        val y0 = w.height * 0.75f
-        val y1 = w.height * 0.25f
-        val start = SystemClock.uptimeMillis()
-        val steps = 10
-        fun send(action: Int, y: Float) {
-            val e = MotionEvent.obtain(start, SystemClock.uptimeMillis(), action, x, y, 0)
-            w.dispatchTouchEvent(e)
-            e.recycle()
-        }
-        send(MotionEvent.ACTION_DOWN, y0)
-        for (i in 1..steps) ui.postDelayed({ send(MotionEvent.ACTION_MOVE, y0 + (y1 - y0) * i / steps) }, i * 20L)
-        ui.postDelayed({ send(MotionEvent.ACTION_UP, y1) }, (steps + 1) * 20L)
     }
 
     // ───────────────────────── data wiping ─────────────────────────
@@ -1170,7 +1295,9 @@ abstract class BrowserActivity : Activity() {
                     var isTor = false
                     try {
                         val s = JSONTokener(raw ?: "").nextValue() as? String ?: ""
-                        isTor = JSONObject(s).optBoolean("IsTor", false)
+                        val jo = JSONObject(s)
+                        isTor = jo.optBoolean("IsTor", false)
+                        TorManager.exitIp = jo.optString("IP", "")
                     } catch (_: Exception) {}
                     finishVerify(isTor, "check.torproject.org says this traffic is NOT coming through Tor")
                 }

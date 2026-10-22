@@ -51,24 +51,8 @@ object Js {
 })();
 """
 
-    // Auto-scroll; at the bottom it clicks "next" (custom selector first).
-    val AUTO = """
-(function(){
-  if(window.__autoT){clearInterval(window.__autoT);window.__autoT=null;}
-  window.__bgSel=__SEL__;
-  window.__autoPause=__PAUSED__;
-  if(!__ON__) return;
-  var idle=0;
-  window.__autoT=setInterval(function(){
-    if(window.__autoPause) return;
-    var el=document.scrollingElement||document.documentElement;
-    var before=el.scrollTop;
-    window.scrollBy(0,__PX__);
-    if(Math.abs(el.scrollTop-before)<1){idle++;}else{idle=0;}
-    if(__CLICK__&&idle>=8){idle=0;if(window.__bgNext)window.__bgNext();}
-  },100);
-})();
-"""
+    // Stops everything the page is saying or playing (speech is cancelled, not just paused).
+    val STOP_ALL = "window.__autoPause=true;try{speechSynthesis.cancel()}catch(e){};document.querySelectorAll('audio,video').forEach(function(m){try{m.pause()}catch(e){}});"
 
     // Replaces speechSynthesis speak/cancel/pause/resume with Android TextToSpeech (needs the BgTts interface).
     val TTS_SHIM = """
@@ -230,5 +214,32 @@ object Js {
     var q=LVL>=1?100:10, pn=performance.now.bind(performance);
     performance.now=function(){return Math.floor(pn()/q)*q;};
   }catch(e){}
+
+  // No referrers: links and forms are marked noreferrer before they navigate, and document.referrer is empty.
+  try{
+    var nr=function(e){
+      try{
+        var el=e.target&&e.target.closest?e.target.closest('a,area,form'):null;
+        if(el){var r=(el.getAttribute('rel')||'');if(r.indexOf('noreferrer')<0)el.setAttribute('rel',(r+' noreferrer noopener').trim());}
+      }catch(x){}
+    };
+    ['click','auxclick','touchstart','mousedown','submit'].forEach(function(n){document.addEventListener(n,nr,true);});
+    dp(document,'referrer','');
+  }catch(e){}
+  try{
+    var mo=new MutationObserver(function(){
+      try{
+        if(document.head){
+          if(!document.querySelector('meta[name=referrer]')){var m=document.createElement('meta');m.name='referrer';m.content='no-referrer';document.head.insertBefore(m,document.head.firstChild);}
+          mo.disconnect();
+        }
+      }catch(x){}
+    });
+    mo.observe(document,{childList:true,subtree:true});
+  }catch(e){}
+
+  // No push, notifications, payments or service workers.
+  dp(N,'serviceWorker',undefined);
+  ['Notification','PushManager','PaymentRequest'].forEach(kill);
 """
 }
