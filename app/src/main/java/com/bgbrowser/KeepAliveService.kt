@@ -29,6 +29,8 @@ import androidx.core.app.NotificationCompat
 object Bridge {
     @Volatile var service: KeepAliveService? = null
     @Volatile var onCommand: ((String) -> Unit)? = null
+    /** Menu "Background" On/Off. Off = service stopped, speech cancelled. Resets to On at launch. */
+    @Volatile var power = true
 }
 
 open class KeepAliveService : Service() {
@@ -40,6 +42,7 @@ open class KeepAliveService : Service() {
     protected open val notifId: Int get() = 42
     protected open val sessionName: String get() = "BgBrowser"
     protected open val privateMode: Boolean get() = false
+    protected open val kindId: Int get() = K_NORMAL
     protected open val activityClass: Class<*> get() = MainActivity::class.java
 
     private val main = Handler(Looper.getMainLooper())
@@ -51,6 +54,10 @@ open class KeepAliveService : Service() {
     private var playing = true
     private var speaking = false
     private var title = "Background Browser"
+    @Volatile private var suspended = false
+
+    // Media link (menu tile, default off): external pause/play controls this app. Per browser mode.
+    private fun linkOn() = Prefs.bool("mediaLink_$kindId", false)
 
     // Headphones or Bluetooth disconnected: stop or pause so the phone speaker does not start talking.
     private val noisy = object : BroadcastReceiver() {
@@ -78,11 +85,11 @@ open class KeepAliveService : Service() {
 
         session = MediaSessionCompat(this, sessionName).apply {
             setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() { setPlaying(true); Bridge.onCommand?.invoke("resume") }
-                override fun onPause() { setPlaying(false); Bridge.onCommand?.invoke("pause") }
-                override fun onStop() { stopSelf() }
+                override fun onPlay() { if (linkOn()) linkedResume(false) }
+                override fun onPause() { if (linkOn()) linkedPause() }
+                override fun onStop() { if (linkOn()) linkedPause() }
             })
-            isActive = true
+            isActive = linkOn()
         }
         pushState()
 
@@ -104,9 +111,54 @@ open class KeepAliveService : Service() {
 
     /** Play/pause from the notification or the floating pill. */
     fun toggle() {
+        if (suspended) { linkedResume(true); return }
         val p = !playing
         setPlaying(p)
         Bridge.onCommand?.invoke(if (p) "resume" else "pause")
+    }
+
+    /** Called when the Media link tile changes. The session only takes media buttons while the link is on. */
+    fun applyLink() {
+        main.post {
+            val on = linkOn()
+            try { session.isActive = on } catch (_: Exception) {}
+            if (!on && suspended) linkedResume(true)
+        }
+    }
+
+    // Playback streams that are not ours (usage media/game/unknown). Our own silent stream counts as 1.
+    private fun mediaStreams(): Int = try {
+        getSystemService(AudioManager::class.java).activePlaybackConfigurations.count {
+            val u = it.audioAttributes.usage
+            u == AudioAttributes.USAGE_MEDIA || u == AudioAttributes.USAGE_GAME || u == AudioAttributes.USAGE_UNKNOWN
+        }
+    } catch (_: Exception) { 0 }
+
+    /** External pause: stop the app (page speech paused, silent stream and locks released). */
+    private fun linkedPause() {
+        if (suspended) return
+        // Another app's media is active and we are not reading aloud: stay out of the way.
+        if (!speaking && mediaStreams() > 1) return
+        suspended = true
+        stopSilence()
+        releaseLocks()
+        setPlaying(false)
+        Bridge.onCommand?.invoke("pause")
+    }
+
+    /** External play: run the app again, unless some other app is playing media. */
+    private fun linkedResume(force: Boolean) {
+        if (!suspended) { setPlaying(true); Bridge.onCommand?.invoke("resume"); return }
+        main.postDelayed({
+            if (!suspended) return@postDelayed
+            // We are stopped, so any active media stream belongs to another app.
+            if (!force && mediaStreams() > 0) return@postDelayed
+            suspended = false
+            acquireLocks()
+            startSilence()
+            setPlaying(true)
+            Bridge.onCommand?.invoke("resume")
+        }, 300)
     }
 
     fun updateMeta(t: String?) {
@@ -190,7 +242,16 @@ open class KeepAliveService : Service() {
     }
 
     @Suppress("DEPRECATION")
+    private fun releaseLocks() {
+        try { wake?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        try { wifi?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        wake = null
+        wifi = null
+    }
+
+    @Suppress("DEPRECATION")
     private fun acquireLocks() {
+        releaseLocks()
         if (Prefs.bool("wakeLock", true)) {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "bgbrowser:wake").apply { acquire() }
@@ -204,7 +265,14 @@ open class KeepAliveService : Service() {
     }
 
     // Inaudible audio stream so the system always sees an active media player.
+    private fun stopSilence() {
+        running = false
+        try { track?.stop(); track?.release() } catch (_: Exception) {}
+        track = null
+    }
+
     private fun startSilence() {
+        stopSilence()
         val rate = 8000
         val min = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val t = AudioTrack.Builder()
@@ -234,10 +302,8 @@ open class KeepAliveService : Service() {
 
     override fun onDestroy() {
         try { unregisterReceiver(noisy) } catch (_: Exception) {}
-        running = false
-        try { track?.stop(); track?.release() } catch (_: Exception) {}
-        wake?.let { if (it.isHeld) it.release() }
-        wifi?.let { if (it.isHeld) it.release() }
+        stopSilence()
+        releaseLocks()
         session.isActive = false
         session.release()
         Bridge.service = null
@@ -249,6 +315,7 @@ class IncognitoKeepService : KeepAliveService() {
     override val notifId: Int get() = 44
     override val sessionName: String get() = "BgBrowserIncognito"
     override val privateMode: Boolean get() = true
+    override val kindId: Int get() = K_INCOG
     override val activityClass: Class<*> get() = IncognitoActivity::class.java
 }
 
@@ -256,5 +323,6 @@ class TorKeepService : KeepAliveService() {
     override val notifId: Int get() = 45
     override val sessionName: String get() = "BgBrowserTor"
     override val privateMode: Boolean get() = true
+    override val kindId: Int get() = K_TOR
     override val activityClass: Class<*> get() = TorActivity::class.java
 }

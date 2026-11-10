@@ -57,7 +57,7 @@ val MENU_TILES = listOf(
     "newtab" to "New tab", "next" to "Next page", "incog" to "Incognito tab", "tor" to "Tor tab",
     "identity" to "New Tor identity", "desktop" to "Desktop site", "forward" to "Forward",
     "copy" to "Copy link", "share" to "Share link", "history" to "History",
-    "sleep" to "Sleep timer", "find" to "Find in page", "bookmark" to "Bookmark this page", "torinfo" to "Tor info", "level" to "Tor security level"
+    "power" to "Background On/Off", "medialink" to "Media link", "sleep" to "Sleep timer", "find" to "Find in page", "bookmark" to "Bookmark this page", "torinfo" to "Tor info", "level" to "Tor security level"
 )
 
 fun dialogTheme(): Int =

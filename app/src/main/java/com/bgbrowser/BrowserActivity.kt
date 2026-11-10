@@ -159,6 +159,7 @@ abstract class BrowserActivity : Activity() {
                 }
             }
         }
+        Bridge.power = true
         if (kind == K_TOR) initTor()
         startKeepAlive()
         openInitialTabs()
@@ -441,6 +442,8 @@ abstract class BrowserActivity : Activity() {
         }
         if (Bridge.service != null) {
             if (all) add(chip("Running in background", C.GREEN))
+        } else if (!Bridge.power) {
+            add(chip("Background off · tap to turn on", C.RED) { setPower(true) })
         } else if (Prefs.bool("keepAlive", true)) {
             add(chip("Not in background · tap to start", C.AMBER) { startKeepAlive(); ui.postDelayed({ updateChips() }, 800) })
         }
@@ -509,6 +512,19 @@ abstract class BrowserActivity : Activity() {
         val tiles = ArrayList<View>()
         if (on("newtab")) tiles.add(tile(R.drawable.ic_add, "New tab") { dismissSheet(); newTab() })
         if (on("next")) tiles.add(tile(R.drawable.ic_next, "Next page") { dismissSheet(); nextNow() })
+        if (on("power")) {
+            val p = Bridge.power
+            tiles.add(tile(R.drawable.ic_power, "Background", if (p) "On" else "Off", if (p) C.GREEN else C.RED) { dismissSheet(); setPower(!p) })
+        }
+        if (on("medialink")) {
+            val key = "mediaLink_$kind"
+            val l = Prefs.bool(key, false)
+            tiles.add(tile(R.drawable.ic_wave, "Media link", if (l) "On" else "Off", if (l) C.GOLD else C.TEXT) {
+                Prefs.put(key, if (l) "0" else "1")
+                Bridge.service?.applyLink()
+                sheetRefresh?.invoke()
+            })
+        }
         if (kind == K_NORMAL) {
             if (on("incog")) tiles.add(tile(R.drawable.ic_incognito, "Incognito") { dismissSheet(); openIncognito(null) })
             if (on("tor")) tiles.add(tile(R.drawable.ic_tor, "Tor") { dismissSheet(); openTor(null) })
@@ -1221,8 +1237,26 @@ abstract class BrowserActivity : Activity() {
 
     // ───────────────────────── keep-alive ─────────────────────────
 
+    /** Menu On/Off: Off cancels speech and stops the background service; On starts it again. */
+    private fun setPower(on: Boolean) {
+        Bridge.power = on
+        if (on) {
+            startKeepAlive()
+            paused = false
+            tabs.forEach { try { it.web.evaluateJavascript(Js.RESUME, null) } catch (_: Exception) {} }
+        } else {
+            paused = true
+            tabs.forEach {
+                try { it.tts?.stop() } catch (_: Exception) {}
+                try { it.web.evaluateJavascript(Js.STOP_ALL, null) } catch (_: Exception) {}
+            }
+            stopService(Intent(this, serviceClass))
+        }
+        ui.postDelayed({ updateChips() }, 600)
+    }
+
     private fun startKeepAlive() {
-        if (Prefs.bool("keepAlive", true)) {
+        if (Bridge.power && Prefs.bool("keepAlive", true)) {
             try { ContextCompat.startForegroundService(this, Intent(this, serviceClass)) } catch (_: Exception) {}
         }
     }
